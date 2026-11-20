@@ -28,8 +28,6 @@ The screenshots use demonstration data. User-entered names and notes are preserv
 
 ![Application outcomes](docs/applications.png)
 
-![Deletion confirmation](docs/delete-confirm.png)
-
 ## Permissions
 
 | Permission | Purpose |

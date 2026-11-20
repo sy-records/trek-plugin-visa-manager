@@ -28,8 +28,6 @@
 
 ![签证申请结果](docs/applications.png)
 
-![删除确认](docs/delete-confirm.png)
-
 ## 权限与数据
 
 | 权限 | 用途 |

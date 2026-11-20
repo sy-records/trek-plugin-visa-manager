@@ -1,0 +1,18 @@
+{
+  "name": "trek-plugin-visa-manager",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "TREK page plugin for personal passports, visas, visa applications and border crossings.",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "npm run build --prefix ../../plugin-sdk && npm run build && node ../../plugin-sdk/dist/cli/trek-plugin.js dev .",
+    "test": "node --test test/*.test.cjs",
+    "validate": "npm run build && node ../../plugin-sdk/dist/cli/trek-plugin.js validate .",
+    "pack": "npm run build && node ../../plugin-sdk/dist/cli/trek-plugin.js pack . --out visa-manager.zip"
+  },
+  "devDependencies": {
+    "trek-plugin-sdk": "^1.10.0"
+  }
+}

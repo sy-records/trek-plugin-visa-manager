@@ -3,13 +3,13 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 const plugin = require('../server');
-const { summarize } = require('../server/domain');
+const { summarize, validate } = require('../server/domain');
 
-async function setup(t) {
+async function setup(t, config = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
   t.after(() => db.close());
-  const ctx = { db: {
+  const ctx = { config, db: {
     async migrate(_id, sql) { db.exec(sql); },
     async exec(sql, ...args) { return db.prepare(sql).run(...args); },
     async query(sql, ...args) { return db.prepare(sql).all(...args); },
@@ -30,7 +30,8 @@ async function setup(t) {
     return { status: result.status, body: JSON.parse(result.body) };
   }
   async function add(kind, body, userId = 1) {
-    const result = await call('POST', `/${kind}/save`, body, userId);
+    const endpoint = kind === 'permitStays' ? 'permit-stays' : kind;
+    const result = await call('POST', `/${endpoint}/save`, body, userId);
     assert.equal(result.status, 201, JSON.stringify(result.body));
     return result.body.id;
   }
@@ -39,12 +40,89 @@ async function setup(t) {
 const passport = { holder: '本人', number: 'E12345678', country: '中国', issuedOn: '2018-01-01', expiresOn: '2028-01-01', status: 'current' };
 const visa = { destination: '日本', type: '旅游', validFrom: '2026-01-01', validUntil: '2029-01-01', totalEntries: 2 };
 const stay = { destination: '日本', entryDate: '2026-11-01', exitDate: '2026-11-04' };
+const permit = {
+  holder: '本人', number: 'H12345678', issuedOn: '2020-01-01', expiresOn: '2030-01-01', status: 'current',
+  endorsements: {
+    hongKong: { type: 'personalTravel', validFrom: '2026-01-01', validUntil: '2026-12-31', totalEntries: 2 },
+    macao: { type: 'familyVisit', validFrom: '2026-01-01', validUntil: '2026-12-31', totalEntries: null },
+  },
+};
+const permitStay = {
+  permitId: 'permit-id', destination: 'hongKong', entryDate: '2026-11-01', exitDate: '2026-11-04',
+  entryPort: 'luohu', exitPort: 'shenzhenBay',
+};
+
+test('permit endorsements support all six types and normalize legacy tourism values', () => {
+  const types = ['personalTravel', 'groupTravel', 'familyVisit', 'business', 'stay', 'other'];
+  for (const type of types) {
+    const validated = validate('permits', { ...permit, endorsements: { hongKong: { ...permit.endorsements.hongKong, type }, macao: null } });
+    assert.equal(validated.endorsements.hongKong.type, type);
+  }
+  const legacy = validate('permits', { ...permit, endorsements: { hongKong: { ...permit.endorsements.hongKong, type: 'tourism' }, macao: null } });
+  assert.equal(legacy.endorsements.hongKong.type, 'personalTravel');
+});
 
 test('initialization can repeat without losing existing personal records', async t => {
   const { ctx, call, add } = await setup(t);
   await add('passports', passport);
   await plugin.onLoad(ctx);
   assert.equal((await call('GET', '/records')).body.passports.length, 1);
+});
+
+test('Hong Kong and Macao permit module follows instance setting and preserves data while disabled', async t => {
+  const { ctx, call, add } = await setup(t);
+  assert.equal((await call('GET', '/records')).body.hongKongMacaoEnabled, false);
+  assert.equal((await call('POST', '/permits/save', permit)).status, 403);
+  ctx.config.hong_kong_macau_enabled = true;
+  const permitId = await add('permits', permit);
+  ctx.config.hong_kong_macau_enabled = false;
+  const hidden = await call('GET', '/records');
+  assert.equal(hidden.body.hongKongMacaoEnabled, false);
+  assert.deepEqual(hidden.body.permits, []);
+  assert.equal((await call('DELETE', '/permits', undefined, 1, { id: permitId })).status, 403);
+  ctx.config.hong_kong_macau_enabled = true;
+  assert.equal((await call('GET', '/records')).body.permits.length, 1);
+});
+
+test('permit CRUD associates crossings, counts only in-validity reached entries, and guards linked deletion', async t => {
+  const { call, add } = await setup(t, { hong_kong_macau_enabled: true });
+  const permitId = await add('permits', permit);
+  const first = await add('permitStays', { ...permitStay, permitId });
+  await add('permitStays', { ...permitStay, permitId, entryDate: '2026-11-10', exitDate: null, entryPort: 'futian', exitPort: '' });
+  await add('permitStays', { ...permitStay, permitId, entryDate: '2027-01-02', exitDate: null, entryPort: 'huanggang', exitPort: '' });
+  const macaoId = await add('permitStays', { ...permitStay, permitId, destination: 'macao', entryDate: '2026-11-12', exitDate: '2026-11-13', entryPort: 'gongbei', exitPort: 'hengqin' });
+  let response = await call('GET', '/records', undefined, 1, { today: '2026-11-20' });
+  const current = response.body.permits.find(record => record.id === permitId);
+  assert.equal(current.number, 'H12345678');
+  assert.equal(current.endorsements.hongKong.usedEntries, 2);
+  assert.equal(current.endorsements.hongKong.remainingEntries, 0);
+  assert.equal(current.endorsements.macao.usedEntries, 1);
+  assert.equal(current.endorsements.macao.remainingEntries, null);
+  assert.equal(response.body.permitStays.find(record => record.id === first).phase, 'completed');
+  assert.equal(response.body.permitStays.find(record => record.id === macaoId).destination, 'macao');
+  assert.equal((await call('DELETE', '/permits', undefined, 1, { id: permitId })).status, 409);
+  assert.equal((await call('DELETE', '/permit-stays', undefined, 1, { id: first })).status, 200);
+  assert.equal((await call('DELETE', '/permit-stays', undefined, 1, { id: macaoId })).status, 200);
+  await call('DELETE', '/permit-stays', undefined, 1, { id: response.body.permitStays.find(record => record.entryDate === '2026-11-10').id });
+  await call('DELETE', '/permit-stays', undefined, 1, { id: response.body.permitStays.find(record => record.entryDate === '2027-01-02').id });
+  assert.equal((await call('DELETE', '/permits', undefined, 1, { id: permitId })).status, 200);
+});
+
+test('permit validation rejects invalid endorsement dates, counts, ownership and ports', async t => {
+  const { call, add } = await setup(t, { hong_kong_macau_enabled: true });
+  const ownPermit = await add('permits', permit);
+  const foreignPermit = await add('permits', permit, 2);
+  for (const patch of [
+    { ...permit, expiresOn: '2019-01-01' },
+    { ...permit, endorsements: { hongKong: { ...permit.endorsements.hongKong, validUntil: '2025-12-31' }, macao: null } },
+    { ...permit, endorsements: { hongKong: { ...permit.endorsements.hongKong, totalEntries: 0 }, macao: null } },
+  ]) assert.equal((await call('POST', '/permits/save', patch)).status, 400);
+  const record = { ...permitStay, permitId: ownPermit };
+  assert.equal((await call('POST', '/permit-stays/save', { ...record, permitId: foreignPermit }, 1)).status, 404);
+  assert.equal((await call('POST', '/permit-stays/save', { ...record, entryPort: 'macaoAirport' })).status, 400);
+  assert.equal((await call('POST', '/permit-stays/save', { ...record, entryDate: '2026-02-30' })).status, 400);
+  assert.equal((await call('POST', '/permit-stays/save', { ...record, exitDate: '', exitPort: 'luohu' })).status, 400);
+  assert.equal((await call('GET', '/records', undefined, 2)).body.permits.length, 1);
 });
 
 test('new passport can travel with a visa in an archived passport; CRUD persists manual values', async t => {

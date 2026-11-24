@@ -2,6 +2,10 @@
 
 const $ = id => document.getElementById(id);
 const { createTranslator, resolveLanguage } = window.visaI18n;
+const PERMIT_PORTS = {
+  hongKong: ['luohu', 'futian', 'huanggang', 'shenzhenBay', 'liantang', 'westKowloon', 'hongKongAirport', 'hzmbHongKong', 'shekouFerry'],
+  macao: ['gongbei', 'hengqin', 'qingmao', 'hzmbMacao', 'macaoAirport', 'outerHarbourFerry', 'taipaFerry'],
+};
 let language = 'en';
 let t = createTranslator(language);
 let data = null;
@@ -11,7 +15,6 @@ let busy = false;
 let loadVersion = 0;
 let loadFailure = null;
 let initialized = false;
-let datePickerCleanups = [];
 let editorLanguage = null;
 
 function el(tag, text, className) {
@@ -71,6 +74,11 @@ async function load() {
     if (version !== loadVersion) return;
     data = result;
     data.applications ??= [];
+    data.permits ??= [];
+    data.permitStays ??= [];
+    $('tab-permits').hidden = !data.hongKongMacaoEnabled;
+    $('tab-permitStays').hidden = !data.hongKongMacaoEnabled;
+    if (!data.hongKongMacaoEnabled && ['permits', 'permitStays'].includes(kind)) kind = 'passports';
     render();
   } catch (error) {
     if (version !== loadVersion) return;
@@ -87,14 +95,21 @@ async function load() {
 
 function render() {
   $('add').disabled = false;
-  $('add').textContent = t(`add.${kind}`);
+  $('add').textContent = t('actions.add');
   const validVisas = data.visas.filter(v => v.validFrom <= data.today && v.validUntil >= data.today).length;
   const ongoing = data.stays.filter(s => s.phase === 'ongoing').length;
-  $('overview').replaceChildren(...[
+  const metrics = [
     [t('metrics.passports'), data.passports.length, t('metrics.passportHint')],
     [t('metrics.visas'), validVisas, t('metrics.visaHint', { count: data.visas.length })],
     [t('metrics.stays'), data.stays.length, t('metrics.stayHint', { count: ongoing })],
-  ].map(([label, count, hint]) => {
+  ];
+  if (data.hongKongMacaoEnabled) {
+    metrics.push(
+      [t('metrics.permits'), data.permits.length, t('metrics.permitHint')],
+      [t('metrics.permitStays'), data.permitStays.length, t('metrics.permitStayHint')],
+    );
+  }
+  $('overview').replaceChildren(...metrics.map(([label, count, hint]) => {
     const card = el('div', null, 'trek-card metric');
     card.append(el('span', label, 'metric-label'), el('strong', count), el('span', hint, 'trek-faint metric-label'));
     return card;
@@ -105,14 +120,16 @@ function render() {
   }
   $('records').setAttribute('aria-labelledby', `tab-${kind}`);
   $('notice').textContent = t(`notices.${kind}`);
-  if (!data[kind].length) {
+  const records = data[kind] ?? [];
+  if (!records.length) {
     const empty = el('div', null, 'empty');
-    empty.append(el('h3', t(`empty.${kind}`)), el('p', kind === 'passports' ? t('empty.passportHint') : t(kind === 'visas' ? 'empty.visaHint' : kind === 'applications' ? 'empty.applicationHint' : 'empty.stayHint'), 'trek-muted'));
+    const hint = ({ passports: 'empty.passportHint', visas: 'empty.visaHint', applications: 'empty.applicationHint', stays: 'empty.stayHint', permits: 'empty.permitHint', permitStays: 'empty.permitStayHint' })[kind];
+    empty.append(el('h3', t(`empty.${kind}`)), el('p', t(hint), 'trek-muted'));
     $('records').replaceChildren(empty);
     return;
   }
   const list = el('div', null, 'record-list');
-  const sorted = [...data[kind]].sort((a, b) => kind === 'stays' ? b.entryDate.localeCompare(a.entryDate) : kind === 'visas' ? b.validUntil.localeCompare(a.validUntil) : kind === 'applications' ? b.submittedOn.localeCompare(a.submittedOn) : b.status.localeCompare(a.status));
+  const sorted = [...records].sort((a, b) => ['stays', 'permitStays'].includes(kind) ? b.entryDate.localeCompare(a.entryDate) : kind === 'visas' ? b.validUntil.localeCompare(a.validUntil) : kind === 'applications' ? b.submittedOn.localeCompare(a.submittedOn) : b.status.localeCompare(a.status));
   for (const record of sorted) list.append(recordCard(record));
   $('records').replaceChildren(list);
 }
@@ -131,6 +148,12 @@ function recordCard(record) {
   } else if (kind === 'applications') {
     title.append(el('h3', record.destination), el('div', `${record.type} · ${record.submittedOn}`, 'record-subtitle'));
     status = [t(`applicationStatus.${record.status}`), record.status === 'approved' ? 'success' : record.status === 'refused' ? 'danger' : record.status === 'withdrawn' ? 'info' : 'accent'];
+  } else if (kind === 'permits') {
+    title.append(el('h3', record.holder), el('div', masked(record.number), 'record-subtitle'));
+    status = record.status === 'archived' ? [t('status.permitArchived'), 'info'] : record.expiresOn < data.today ? [t('status.expired'), 'danger'] : record.issuedOn && record.issuedOn > data.today ? [t('status.notYetValid'), 'info'] : [t('status.permitActive'), 'success'];
+  } else if (kind === 'permitStays') {
+    title.append(el('h3', t(`select.${record.destination}`)), el('div', `${portLabel(record, 'entryPort')} → ${record.exitDate ? portLabel(record, 'exitPort') : t('values.noDeparture')}`, 'record-subtitle'));
+    status = record.phase === 'planned' ? [t('status.planned'), 'info'] : record.phase === 'ongoing' ? [t('status.ongoing'), 'accent'] : [t('status.completed'), 'success'];
   } else {
     title.append(el('h3', [record.entryLocation ?? record.destination, record.exitLocation].filter(Boolean).join(' → ')), el('div', `${record.entryDate} → ${record.exitDate ?? t('values.noDeparture')}`, 'record-subtitle'));
     status = record.phase === 'planned' ? [t('status.planned'), 'info'] : record.phase === 'ongoing' ? [t('status.ongoing'), 'accent'] : [t('status.completed'), 'success'];
@@ -157,6 +180,30 @@ function recordCard(record) {
     detail(details, t('fields.decidedOn'), record.decidedOn);
     const linkedVisa = data.visas.find(v => v.applicationId === record.id);
     if (linkedVisa) detail(details, t('fields.linkedVisa'), visaLabel(linkedVisa), true);
+  } else if (kind === 'permits') {
+    detail(details, t('fields.issuedOn'), record.issuedOn);
+    detail(details, t('fields.permitExpiry'), record.expiresOn);
+    for (const destination of ['hongKong', 'macao']) {
+      const endorsement = record.endorsements?.[destination];
+      const label = t(destination === 'hongKong' ? 'fields.hkEndorsement' : 'fields.macaoEndorsement');
+      if (!endorsement) detail(details, label, t('select.noEndorsement'));
+      else {
+        const total = endorsement.totalEntries === null ? t('values.unlimited') : t('values.entries', { count: endorsement.totalEntries });
+        const remaining = endorsement.remainingEntries === null ? t('values.unlimited') : t('values.entries', { count: endorsement.remainingEntries });
+        detail(details, label, `${endorsementLabel(endorsement.type)} · ${endorsement.validFrom} – ${endorsement.validUntil}`, true);
+        detail(details, t('fields.usedEntries'), t('values.entries', { count: endorsement.usedEntries }));
+        detail(details, t('fields.remainingEntries'), `${remaining} / ${total}`);
+      }
+    }
+  } else if (kind === 'permitStays') {
+    const permit = data.permits.find(item => item.id === record.permitId);
+    detail(details, t('fields.permitId'), permit ? `${permit.holder} · ${masked(permit.number)}` : t('values.notLinked'), true);
+    detail(details, t('fields.entryDate'), record.entryDate);
+    detail(details, t('fields.exitDate'), record.exitDate || t('values.noDeparture'));
+    detail(details, t('fields.entryPortDetail'), portLabel(record, 'entryPort'));
+    detail(details, t('fields.exitPortDetail'), record.exitDate ? portLabel(record, 'exitPort') : t('values.notProvided'));
+    const endorsement = permit?.endorsements?.[record.destination];
+    detail(details, t('fields.currentEndorsement'), endorsement ? `${endorsementLabel(endorsement.type)} · ${t('values.entries', { count: endorsement.usedEntries })} / ${endorsement.totalEntries === null ? t('values.unlimited') : t('values.entries', { count: endorsement.totalEntries })}` : t('select.noEndorsement'), true);
   } else {
     detail(details, t('fields.entryLocation'), record.entryLocation ?? record.destination);
     detail(details, t('fields.exitLocation'), record.exitLocation || t('values.notProvided'));
@@ -179,8 +226,25 @@ function recordCard(record) {
   return card;
 }
 
+function endorsementLabel(type) {
+  const normalized = type === 'tourism' ? 'personalTravel' : type;
+  return t(`select.${normalized === 'other' ? 'otherEndorsement' : normalized}`);
+}
+
+function portLabel(record, field) {
+  return record[field] === 'other' ? record[`${field}Other`] : t(`port.${record[field]}`);
+}
+
 function applicationLabel(application) {
   return application ? `${application.destination} · ${application.type} · ${application.submittedOn}` : t('values.notLinked');
+}
+
+function portOptions(destination) {
+  return [...(PERMIT_PORTS[destination] ?? []), 'other'].map(code => [code, t(code === 'other' ? 'select.otherPort' : `port.${code}`)]);
+}
+
+function endorsementTypeOptions() {
+  return ['personalTravel', 'groupTravel', 'familyVisit', 'business', 'stay', 'other'].map(type => [type, t(`select.${type === 'other' ? 'otherEndorsement' : type}`)]);
 }
 
 function fieldsFor() {
@@ -212,6 +276,34 @@ function fieldsFor() {
     ['remainingEntriesOverride', t('fields.remainingEntriesOverride'), 'number', false, null, t('hints.remainingEntriesOverride')],
     ['notes', t('fields.notes'), 'textarea'],
   ];
+  if (kind === 'permits') return [
+    ['holder', t('fields.holder'), 'text', true], ['number', t('fields.permitNumber'), 'text', true, null, '', 40],
+    ['status', t('fields.permitStatus'), 'select', true, [['current', t('fields.currentPermit')], ['archived', t('fields.archivedPermit')]]],
+    ['issuedOn', t('fields.issuedOn'), 'date'], ['expiresOn', t('fields.permitExpiry'), 'date', true],
+    ['hkSection', t('fields.hkEndorsement'), 'section'],
+    ['hkEndorsementType', t('fields.endorsementType'), 'select', false, endorsementTypeOptions()],
+    ['hkEndorsementValidFrom', t('fields.validFrom'), 'date'], ['hkEndorsementValidUntil', t('fields.validUntil'), 'date'],
+    ['hkEndorsementTotalEntries', t('fields.endorsementEntries'), 'number', false, null, t('hints.totalEntries')],
+    ['macaoSection', t('fields.macaoEndorsement'), 'section'],
+    ['macaoEndorsementType', t('fields.endorsementType'), 'select', false, endorsementTypeOptions()],
+    ['macaoEndorsementValidFrom', t('fields.validFrom'), 'date'], ['macaoEndorsementValidUntil', t('fields.validUntil'), 'date'],
+    ['macaoEndorsementTotalEntries', t('fields.endorsementEntries'), 'number', false, null, t('hints.totalEntries')],
+    ['notes', t('fields.notes'), 'textarea'],
+  ];
+  if (kind === 'permitStays') {
+    const destination = editing?.destination ?? 'hongKong';
+    return [
+      ['permitId', t('fields.permitId'), 'select', true, [...data.permits].sort((a, b) => Number(a.status === 'archived') - Number(b.status === 'archived')).map(permit => [permit.id, `${permit.holder} · ${masked(permit.number)}`])],
+      ['destination', t('fields.permitDestination'), 'select', true, [['hongKong', t('select.hongKong')], ['macao', t('select.macao')]]],
+      ['entryDate', t('fields.entryDate'), 'date', true],
+      ['entryPort', t('fields.entryPort'), 'select', true, portOptions(destination)],
+      ['entryPortOther', t('fields.otherPort'), 'text', false],
+      ['exitDate', t('fields.exitDate'), 'date'],
+      ['exitPort', t('fields.exitPort'), 'select', false, [['', t('select.placeholder')], ...portOptions(destination)]],
+      ['exitPortOther', t('fields.otherPort'), 'text', false],
+      ['notes', t('fields.notes'), 'textarea'],
+    ];
+  }
   return [
     ['passportId', t('fields.travelPassport'), 'select', true, passportOptions],
     ['entryLocation', t('fields.entryLocation'), 'text', true], ['exitLocation', t('fields.exitLocation'), 'text'],
@@ -224,33 +316,116 @@ function fieldsFor() {
 
 function openEditor(record = null, defaults = {}) {
   if (busy || !data) return;
-  if (kind !== 'passports' && !data.passports.length) { errorAt('error', t('messages.needPassport')); return; }
+  if (kind === 'permitStays' && !data.permits.length) { errorAt('error', t('messages.needPermit')); return; }
+  if (!['passports', 'permits', 'permitStays'].includes(kind) && !data.passports.length) { errorAt('error', t('messages.needPassport')); return; }
   editing = record;
   renderEditor(record ?? defaults);
   $('editor').showModal();
+}
+
+function editorValue(record, key) {
+  if (!record) return undefined;
+  if (Object.hasOwn(record, key)) return record[key];
+  const match = /^(hk|macao)Endorsement(Type|ValidFrom|ValidUntil|TotalEntries)$/.exec(key);
+  if (!match) return undefined;
+  const destination = match[1] === 'hk' ? 'hongKong' : 'macao';
+  const endorsement = record.endorsements?.[destination];
+  if (!endorsement) return '';
+  const field = { Type: 'type', ValidFrom: 'validFrom', ValidUntil: 'validUntil', TotalEntries: 'totalEntries' }[match[2]];
+  const value = endorsement[field];
+  if (match[2] === 'Type' && value === 'tourism') return 'personalTravel';
+  return value == null ? '' : value;
+}
+
+function setupPermitForm() {
+  for (const prefix of ['hk', 'macao']) {
+    const type = $(`field-${prefix}EndorsementType`);
+    const validFrom = $(`field-${prefix}EndorsementValidFrom`);
+    const validUntil = $(`field-${prefix}EndorsementValidUntil`);
+    const totalEntries = $(`field-${prefix}EndorsementTotalEntries`);
+    const update = () => {
+      const enabled = !!type.value;
+      for (const input of [validFrom, validUntil, totalEntries]) {
+        input.parentElement.hidden = !enabled;
+        input.required = enabled && input !== totalEntries;
+        if (!enabled) input.value = '';
+      }
+    };
+    type.addEventListener('change', update);
+    update();
+  }
+}
+
+function setupPermitStayForm() {
+  const destination = $('field-destination');
+  const entryPort = $('field-entryPort');
+  const exitPort = $('field-exitPort');
+  const entryOther = $('field-entryPortOther');
+  const exitOther = $('field-exitPortOther');
+  const exitDate = $('field-exitDate');
+  const replaceOptions = (select, options, preserveBlank) => {
+    const current = select.value;
+    select.replaceChildren(...(preserveBlank ? [new Option(t('select.placeholder'), '')] : []), ...options.map(([value, label]) => new Option(label, value)));
+    select.value = options.some(([value]) => value === current) ? current : '';
+  };
+  const updateDestination = () => {
+    replaceOptions(entryPort, portOptions(destination.value), false);
+    replaceOptions(exitPort, portOptions(destination.value), true);
+  };
+  const updatePortField = (select, other, required) => {
+    const show = select.value === 'other';
+    other.parentElement.hidden = !show;
+    other.required = show && required;
+    if (!show) other.value = '';
+  };
+  const updateExit = () => {
+    const hasExit = !!exitDate.value;
+    const hasPort = hasExit && exitPort.value !== '';
+    exitPort.parentElement.hidden = !hasExit;
+    exitPort.required = hasExit;
+    exitOther.required = hasPort && exitPort.value === 'other';
+    if (!hasExit) { exitPort.value = ''; exitOther.value = ''; }
+    updatePortField(exitPort, exitOther, hasExit);
+  };
+  destination.addEventListener('change', updateDestination);
+  entryPort.addEventListener('change', () => updatePortField(entryPort, entryOther, true));
+  exitPort.addEventListener('change', updateExit);
+  exitDate.addEventListener('change', updateExit);
+  updateDestination();
+  updatePortField(entryPort, entryOther, true);
+  updateExit();
 }
 
 function renderEditor(record) {
   editorLanguage = language;
   errorAt('form-error');
   $('editor-title').textContent = t(`${editing ? 'edit' : 'add'}.${kind}`);
-  for (const cleanup of datePickerCleanups) cleanup();
-  datePickerCleanups = [];
   const fields = fieldsFor().map(([key, label, type, required, options, hint, max]) => {
     const wide = type === 'textarea' || key === 'applicationId' || (kind === 'stays' && key === 'passportId');
+    if (type === 'section') {
+      const section = el('div', null, 'field wide form-section');
+      section.append(el('h3', label));
+      return section;
+    }
     const field = el('div', null, `field${wide ? ' wide' : ''}`);
     field.dataset.key = key;
     const caption = el('label', `${label}${required ? ' *' : ''}`, 'trek-label');
     caption.htmlFor = `field-${key}`;
     if (type === 'date') {
-      const picker = el('div', null, 'date-picker');
-      picker.id = `picker-${key}`;
-      field.append(caption, picker);
-      datePickerCleanups.push(window.visaDatePicker.mount(picker, {
-        name: key, label, language, value: record?.[key] ?? (key === 'submittedOn' ? localDate() : ''), required: !!required,
-        min: '1900-01-01', max: '2199-12-31', portalContainer: $('editor'),
-        onInvalid: message => errorAt('form-error', message),
-      }));
+      const input = el('input', null, 'trek-input');
+      input.type = 'date';
+      input.id = `field-${key}`;
+      input.name = key;
+      input.required = !!required;
+      input.min = '1900-01-01';
+      input.max = '2199-12-31';
+      input.value = editorValue(record, key) ?? (key === 'submittedOn' ? localDate() : '');
+      input.autocomplete = 'off';
+      input.addEventListener('invalid', event => {
+        event.preventDefault();
+        errorAt('form-error', t('errors.required', { field: label }));
+      });
+      field.append(caption, input);
       if (hint) field.append(el('small', hint));
       return field;
     }
@@ -259,14 +434,15 @@ function renderEditor(record) {
     input.name = key;
     input.required = !!required;
     if (type === 'select') {
-      input.append(new Option(required ? t('select.placeholder') : t(key === 'applicationId' ? 'select.noApplication' : 'select.noVisa'), ''));
+      const emptyLabel = required ? t('select.placeholder') : key.endsWith('EndorsementType') ? t('select.noEndorsement') : t(key === 'applicationId' ? 'select.noApplication' : 'select.noVisa');
+      input.append(new Option(emptyLabel, ''));
       for (const [value, text] of options) input.append(new Option(text, value));
     } else if (type !== 'textarea') {
       input.type = type;
       if (type === 'number') { input.min = '0'; input.max = '1000000'; input.step = '1'; }
       else input.maxLength = max ?? 160;
     } else input.maxLength = 5000;
-    input.value = record?.[key] ?? (key === 'status' ? kind === 'applications' ? 'submitted' : 'current' : key === 'entryLocation' ? record?.destination ?? '' : '');
+    input.value = editorValue(record, key) ?? (key === 'status' ? kind === 'applications' ? 'submitted' : 'current' : key === 'entryLocation' ? record?.destination ?? '' : key === 'destination' && kind === 'permitStays' ? 'hongKong' : '');
     if (key === 'applicationId') input.addEventListener('change', () => {
       const application = data.applications.find(a => a.id === input.value);
       if (!application) return;
@@ -286,6 +462,8 @@ function renderEditor(record) {
     dateRow.append(...fields.filter(field => ['entryDate', 'exitDate'].includes(field.dataset.key)));
     $('fields').replaceChildren(...fields.flatMap(field => field.dataset.key === 'entryDate' ? [dateRow] : field.dataset.key === 'exitDate' ? [] : [field]));
   } else $('fields').replaceChildren(...fields);
+  if (kind === 'permits') setupPermitForm();
+  if (kind === 'permitStays') setupPermitStayForm();
 }
 
 function setBusy(value) {
@@ -299,6 +477,20 @@ $('record-form').addEventListener('submit', async event => {
   if (busy) return;
   const body = Object.fromEntries(new FormData($('record-form')));
   for (const [key, , type] of fieldsFor()) if (type === 'number') body[key] = body[key] === '' ? null : Number(body[key]);
+  if (kind === 'permits') {
+    body.endorsements = {};
+    for (const [prefix, destination] of [['hk', 'hongKong'], ['macao', 'macao']]) {
+      const type = body[`${prefix}EndorsementType`];
+      if (type) body.endorsements[destination] = {
+        type,
+        validFrom: body[`${prefix}EndorsementValidFrom`],
+        validUntil: body[`${prefix}EndorsementValidUntil`],
+        totalEntries: body[`${prefix}EndorsementTotalEntries`] == null || body[`${prefix}EndorsementTotalEntries`] === '' ? null : Number(body[`${prefix}EndorsementTotalEntries`]),
+      };
+      else body.endorsements[destination] = null;
+      for (const suffix of ['Type', 'ValidFrom', 'ValidUntil', 'TotalEntries']) delete body[`${prefix}Endorsement${suffix}`];
+    }
+  }
   if (editing) body.id = editing.id;
   if (kind === 'applications' && editing) {
     const visa = data.visas.find(v => v.applicationId === editing.id);
@@ -317,7 +509,8 @@ $('record-form').addEventListener('submit', async event => {
   setBusy(true);
   errorAt('form-error');
   try {
-    await invoke(`/${kind}/save`, { method: 'POST', body });
+    const endpoint = kind === 'permitStays' ? 'permit-stays' : kind;
+    await invoke(`/${endpoint}/save`, { method: 'POST', body });
     $('editor').close();
     trek.notify('success', t('messages.saved'));
     await load();
@@ -330,7 +523,8 @@ async function deleteRecord(recordKind, record) {
   try {
     const confirmed = await trek.confirm({ title: t(`delete.${recordKind}`), message: t('actions.confirmDelete'), confirmLabel: t('actions.deleteRecord'), cancelLabel: t('actions.keep'), danger: true });
     if (!confirmed) return;
-    await invoke(`/${recordKind}?id=${encodeURIComponent(record.id)}`, { method: 'DELETE' });
+    const endpoint = recordKind === 'permitStays' ? 'permit-stays' : recordKind;
+    await invoke(`/${endpoint}?id=${encodeURIComponent(record.id)}`, { method: 'DELETE' });
     trek.notify('success', t('messages.deleted'));
     await load();
   } catch (error) { errorAt('error', error.message); }
@@ -339,7 +533,7 @@ async function deleteRecord(recordKind, record) {
 function selectTab(next) { if (!busy) { kind = next; if (data) render(); } }
 for (const tab of $('tabs').children) tab.addEventListener('click', () => selectTab(tab.dataset.kind));
 $('tabs').addEventListener('keydown', event => {
-  const tabs = [...$('tabs').children];
+  const tabs = [...$('tabs').children].filter(tab => !tab.hidden);
   const index = tabs.indexOf(document.activeElement);
   if (index < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
@@ -350,10 +544,6 @@ $('add').addEventListener('click', () => openEditor());
 $('retry').addEventListener('click', load);
 $('reveal').addEventListener('change', () => { if (data) render(); });
 for (const key of ['close', 'cancel']) $(key).addEventListener('click', () => { if (!busy) $('editor').close(); });
-$('editor').addEventListener('close', () => {
-  for (const cleanup of datePickerCleanups) cleanup();
-  datePickerCleanups = [];
-});
 $('editor').addEventListener('cancel', event => { if (busy) event.preventDefault(); });
 window.addEventListener('focus', () => { if (data && data.today !== localDate() && !$('editor').open && !busy) load(); });
 function applyLanguage(locale) {

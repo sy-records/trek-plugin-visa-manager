@@ -1,3 +1,5 @@
 .trek-dev/
 *.zip
 client/ui.js
+package-lock.json
+dev-fixtures.json

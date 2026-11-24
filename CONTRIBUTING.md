@@ -6,7 +6,7 @@ English | [简体中文](CONTRIBUTING.zh-CN.md)
 
 ## Build and install from this repository
 
-The source currently lives inside the TREK repository and bundles TREK's shared date-picker component. Build it from this checkout; copying only this plugin directory is not enough to rebuild the UI.
+Build the UI from this checkout. TREK's plugin SDK is still needed to validate and pack an installable archive.
 
 From the TREK repository root, install the workspace and SDK dependencies:
 
@@ -26,6 +26,22 @@ npm run pack --prefix plugins/visa-manager
 This creates `plugins/visa-manager/visa-manager.zip`. In a TREK instance with `TREK_PLUGINS_ENABLED=1`, open **Admin → Plugins → Upload plugin**, upload the archive, then enable it and accept its two permissions. Open **Passports & Visas** from the navigation.
 
 The archive includes the built client assets and server JavaScript. The host injects the SDK at runtime; it is a development dependency and is not bundled into the plugin server.
+
+### Testing the Hong Kong and Macao setting
+
+In TREK, open **Admin → Plugins**, find **Passports & Visas**, and choose **⋯ → Instance settings** on its row. Enable **Enable Hong Kong & Macao permit management** and save. After the plugin restarts, reopen its page; the **HK & Macao permits** and **HK & Macao crossings** tabs should appear. Disable the setting and save to hide both tabs. Existing records are preserved and should appear again when the setting is re-enabled.
+
+For local preview, create `dev-fixtures.json` in the plugin root and use a boolean to simulate the setting:
+
+```json
+{
+  "config": {
+    "hong_kong_macau_enabled": true
+  }
+}
+```
+
+Set the value to `false` to simulate the disabled state. Restart the preview service after editing the file, then reload the entire `/preview` page. This fixture only affects local preview; it does not change the instance setting stored by TREK.
 
 ## Local preview
 

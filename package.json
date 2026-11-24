@@ -7,12 +7,13 @@
   "license": "AGPL-3.0-only",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "dev": "npm run build --prefix ../../plugin-sdk && npm run build && node ../../plugin-sdk/dist/cli/trek-plugin.js dev .",
+    "dev": "npm run build && node scripts/dev.mjs",
     "test": "node --test test/*.test.cjs",
-    "validate": "npm run build && node ../../plugin-sdk/dist/cli/trek-plugin.js validate .",
-    "pack": "npm run build && node ../../plugin-sdk/dist/cli/trek-plugin.js pack . --out visa-manager.zip"
+    "validate": "npm run build && trek-plugin validate .",
+    "pack": "npm run build && trek-plugin pack . --out visa-manager.zip"
   },
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "trek-plugin-sdk": "^1.10.0"
   }
 }

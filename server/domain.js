@@ -39,6 +39,12 @@ function id(value, label, optional = false) {
 }
 
 const APPLICATION_STATUSES = ['submitted', 'reviewing', 'approved', 'refused', 'withdrawn'];
+const PERMIT_DESTINATIONS = ['hongKong', 'macao'];
+const PERMIT_PORTS = {
+  hongKong: ['luohu', 'futian', 'huanggang', 'shenzhenBay', 'liantang', 'westKowloon', 'hongKongAirport', 'hzmbHongKong', 'shekouFerry'],
+  macao: ['gongbei', 'hengqin', 'qingmao', 'hzmbMacao', 'macaoAirport', 'outerHarbourFerry', 'taipaFerry'],
+};
+const ENDORSEMENT_TYPES = ['personalTravel', 'groupTravel', 'familyVisit', 'business', 'stay', 'other'];
 
 // Older versions stored a separate adjustment reason. Keep that text in Notes.
 function normalizeRecord(record) {
@@ -53,6 +59,77 @@ function validate(kind, body) {
   const notes = text(body.notes, 'fields.notes', false, 5000);
   const legacyReason = text(body.adjustmentReason, 'fields.notes', false, 500);
   const common = { notes: text(normalizeRecord({ notes, adjustmentReason: legacyReason }).notes, 'fields.notes', false, 5000) };
+  if (kind === 'permits') {
+    const issuedOn = date(body.issuedOn, 'fields.issuedOn');
+    const expiresOn = date(body.expiresOn, 'fields.permitExpiry', true);
+    if (issuedOn && issuedOn > expiresOn) throw new InputError('errors.permitDateOrder');
+    if (!['current', 'archived'].includes(body.status)) throw new InputError('errors.passportStatus');
+    const rawEndorsements = body.endorsements;
+    if (!rawEndorsements || typeof rawEndorsements !== 'object' || Array.isArray(rawEndorsements)) throw new InputError('errors.invalidRecord');
+    const endorsements = {};
+    for (const destination of PERMIT_DESTINATIONS) {
+      const raw = rawEndorsements[destination];
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        endorsements[destination] = null;
+        continue;
+      }
+      const hasValues = Object.values(raw).some(value => value != null && value !== '');
+      if (!hasValues) {
+        endorsements[destination] = null;
+        continue;
+      }
+      const endorsementType = raw.type === 'tourism' ? 'personalTravel' : raw.type;
+      if (!ENDORSEMENT_TYPES.includes(endorsementType)) throw new InputError('errors.endorsementType');
+      const validFrom = date(raw.validFrom, 'fields.validFrom', true);
+      const validUntil = date(raw.validUntil, 'fields.validUntil', true);
+      if (validFrom > validUntil) throw new InputError('errors.visaDateOrder');
+      const totalEntries = integer(raw.totalEntries, 'fields.totalEntries', true);
+      if (totalEntries !== null && totalEntries < 1) throw new InputError('errors.invalidInteger', { field: 'fields.totalEntries' });
+      endorsements[destination] = {
+        type: endorsementType,
+        validFrom,
+        validUntil,
+        totalEntries,
+      };
+    }
+    return {
+      ...common,
+      holder: text(body.holder, 'fields.holder', true),
+      number: text(body.number, 'fields.permitNumber', true, 40).toUpperCase(),
+      issuedOn,
+      expiresOn,
+      status: body.status,
+      endorsements,
+    };
+  }
+  if (kind === 'permitStays') {
+    const destination = text(body.destination, 'fields.destination', true, 20);
+    if (!PERMIT_DESTINATIONS.includes(destination)) throw new InputError('errors.permitDestination');
+    const entryDate = date(body.entryDate, 'fields.entryDate', true);
+    const exitDate = date(body.exitDate, 'fields.exitDate');
+    if (exitDate && exitDate < entryDate) throw new InputError('errors.stayDateOrder');
+    const port = (value, otherValue, label, required) => {
+      if ((value == null || value === '') && !required) return { code: null, other: '' };
+      const code = text(value, label, required, 40);
+      if (code === 'other') return { code, other: text(otherValue, 'fields.otherPort', true, 120) };
+      if (!PERMIT_PORTS[destination].includes(code)) throw new InputError('errors.invalidPort', { field: label });
+      return { code, other: '' };
+    };
+    const entryPort = port(body.entryPort, body.entryPortOther, 'fields.entryPort', true);
+    const exitPort = port(body.exitPort, body.exitPortOther, 'fields.exitPort', !!exitDate);
+    if (!exitDate && (body.exitPort || body.exitPortOther)) throw new InputError('errors.exitPortWithoutDate');
+    return {
+      ...common,
+      permitId: id(body.permitId, 'fields.permitId'),
+      destination,
+      entryDate,
+      exitDate,
+      entryPort: entryPort.code,
+      entryPortOther: entryPort.other,
+      exitPort: exitPort.code,
+      exitPortOther: exitPort.other,
+    };
+  }
   if (kind === 'applications') {
     if (!APPLICATION_STATUSES.includes(body.status)) throw new InputError('errors.applicationStatus');
     const submittedOn = date(body.submittedOn, 'fields.submittedOn', true);
@@ -101,4 +178,39 @@ function summarize(data, today) {
   };
 }
 
-module.exports = { InputError, id, date, validate, summarize, normalizeRecord, APPLICATION_STATUSES };
+function permitStaySummary(stay, today) {
+  const phase = stay.entryDate > today ? 'planned' : stay.exitDate && stay.exitDate <= today ? 'completed' : 'ongoing';
+  return { ...stay, phase };
+}
+
+function summarizePermits(data, today) {
+  const permitStays = (data.permitStays ?? []).map(stay => permitStaySummary(stay, today));
+  const permits = (data.permits ?? []).map(permit => {
+    const endorsements = {};
+    for (const destination of PERMIT_DESTINATIONS) {
+      const endorsement = permit.endorsements?.[destination];
+      if (!endorsement) {
+        endorsements[destination] = null;
+        continue;
+      }
+      const usedEntries = permitStays.filter(stay =>
+        stay.permitId === permit.id &&
+        stay.destination === destination &&
+        (stay.endorsementId === endorsement.id || stay.endorsementId == null) &&
+        stay.entryDate >= endorsement.validFrom &&
+        stay.entryDate <= endorsement.validUntil &&
+        stay.entryDate <= today
+      ).length;
+      endorsements[destination] = {
+        ...endorsement,
+        type: endorsement.type === 'tourism' ? 'personalTravel' : endorsement.type,
+        usedEntries,
+        remainingEntries: endorsement.totalEntries === null ? null : Math.max(0, endorsement.totalEntries - usedEntries),
+      };
+    }
+    return { ...permit, endorsements };
+  });
+  return { permits, permitStays };
+}
+
+module.exports = { InputError, id, date, validate, summarize, summarizePermits, normalizeRecord, APPLICATION_STATUSES, PERMIT_DESTINATIONS, PERMIT_PORTS, ENDORSEMENT_TYPES };

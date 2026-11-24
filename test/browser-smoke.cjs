@@ -15,7 +15,11 @@ const assert = require('node:assert/strict');
   const pluginDir = path.join(scratch, 'visa-manager');
   fs.mkdirSync(pluginDir);
   for (const file of ['server', 'client', 'trek-plugin.json', 'package.json']) fs.cpSync(path.join(source, file), path.join(pluginDir, file), { recursive: true });
-  const sdkUrl = pathToFileURL(path.resolve(source, '../../plugin-sdk/dist/cli/dev.js')).href;
+  fs.writeFileSync(path.join(pluginDir, 'dev-fixtures.json'), JSON.stringify({ config: { hong_kong_macau_enabled: true } }));
+  const localSdk = path.resolve(source, '../../plugin-sdk/dist/cli/dev.js');
+  const installedSdk = path.resolve(source, 'node_modules/trek-plugin-sdk/dist/cli/dev.js');
+  const sdkEntry = fs.existsSync(localSdk) ? localSdk : installedSdk;
+  const sdkUrl = pathToFileURL(sdkEntry).href;
   const port = 14317 + Math.floor(Math.random() * 10000);
   const child = spawn(process.execPath, ['--input-type=module', '-e', `import {runDev} from ${JSON.stringify(sdkUrl)}; await runDev(${JSON.stringify(pluginDir)}, {port:${port}});`], { stdio: ['ignore', 'pipe', 'pipe'] });
   let browser;
@@ -58,29 +62,25 @@ const assert = require('node:assert/strict');
     await expect(frame.getByRole('heading', { name: 'No passports yet' })).toBeVisible();
     await expect(frame.locator('#retry')).not.toBeVisible();
     await expect(frame.locator('#error')).not.toBeVisible();
+    await expect(frame.locator('#overview')).toContainText('HK & Macao permit records');
+    await expect(frame.locator('#overview')).toContainText('HK & Macao crossings');
     assert.equal(recordReads, 2, 'retry should recover the failed initial load');
     await expect(frame.getByRole('heading', { name: 'Passports & Visas', exact: true })).toBeVisible();
     await expect(frame.locator('.footnote')).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await frame.locator('body').evaluate(body => body.scrollWidth <= window.innerWidth), true, 'English mobile layout must fit the viewport');
+    await page.setViewportSize({ width: 1024, height: 1100 });
+    const toolbarBox = await frame.locator('.toolbar').boundingBox();
+    const tabsBox = await frame.locator('#tabs').boundingBox();
+    const actionsBox = await frame.locator('.actions').boundingBox();
+    assert.ok(tabsBox && actionsBox && Math.abs(tabsBox.y - actionsBox.y) < 1, 'desktop tabs and actions should stay on one row');
+    assert.ok(toolbarBox && tabsBox && actionsBox && tabsBox.width < toolbarBox.width - actionsBox.width - 12, 'tab background should wrap its labels instead of filling the toolbar');
+    assert.ok(toolbarBox && actionsBox && toolbarBox.x + toolbarBox.width - actionsBox.x - actionsBox.width < 2, 'toolbar actions should stay at the far right');
     await page.setViewportSize({ width: 1440, height: 1100 });
     await setLanguage('de-DE');
-    await expect(frame.getByRole('button', { name: 'Add passport', exact: true })).toBeVisible();
+    await expect(frame.getByRole('button', { name: 'Add', exact: true })).toBeVisible();
     async function fill(key, value) {
-      const picker = frame.locator(`#picker-${key}`);
-      if (await picker.count()) {
-        await picker.getByRole('button', { name: /^(手动输入日期|Enter date manually)$/ }).click();
-        const input = picker.getByRole('textbox', { name: /^(手动输入日期|Enter date manually)$/ });
-        await input.fill(value);
-        await input.press('Enter');
-      } else await frame.locator(`#field-${key}`).fill(value);
-    }
-    async function chooseDay(key, day) {
-      await frame.locator(`#picker-${key}`).getByRole('button').first().click();
-      const calendar = frame.getByRole('dialog', { name: '日期选择器', exact: true });
-      await expect(calendar).toBeVisible();
-      await calendar.getByRole('button', { name: new RegExp(`月${day}日$`) }).click();
-      await expect(calendar).not.toBeVisible();
+      await frame.locator(`#field-${key}`).fill(value);
     }
     async function select(key, value) { await frame.locator(`#field-${key}`).selectOption(value, { force: true }); }
     async function save() { await frame.getByRole('button', { name: '保存记录', exact: true }).click(); await expect(frame.locator('#editor')).not.toBeVisible(); }
@@ -92,33 +92,29 @@ const assert = require('node:assert/strict');
       await expect(confirm).not.toBeVisible();
     }
     async function assertDateRow() {
-      const a = await frame.locator('#picker-entryDate').boundingBox();
-      const b = await frame.locator('#picker-exitDate').boundingBox();
+      const a = await frame.locator('#field-entryDate').boundingBox();
+      const b = await frame.locator('#field-exitDate').boundingBox();
       assert.ok(Math.abs(a.y - b.y) < 2 && a.x < b.x, 'entry and departure dates must share a row');
     }
 
     async function newPassport(number, status) {
-      await frame.getByRole('button', { name: '新增护照', exact: true }).click();
+      await frame.getByRole('button', { name: 'Add', exact: true }).click();
       await fill('holder', '演示用户'); await fill('number', number); await fill('country', '中国');
       await select('status', status); await fill('issuedOn', '2020-01-01'); await fill('expiresOn', '2030-01-01');
-      await fill('expiresOn', '2030-02-30');
-      await expect(frame.locator('#form-error')).toContainText('日期不正确');
-      await expect(frame.locator('#field-expiresOn')).toHaveValue('2030-01-01');
+      await expect(frame.locator('#field-expiresOn')).toHaveAttribute('type', 'date');
+      await expect(frame.locator('#field-expiresOn')).toHaveAttribute('min', '1900-01-01');
+      await expect(frame.locator('#field-expiresOn')).toHaveAttribute('max', '2199-12-31');
       await save();
     }
-    // Locale changes must retain unsaved input and update the shared date picker.
-    await frame.getByRole('button', { name: 'Add passport', exact: true }).click();
+    // Locale changes must retain unsaved values in native date inputs.
+    await frame.getByRole('button', { name: 'Add', exact: true }).click();
     await fill('holder', 'Unsaved name');
     await fill('issuedOn', '2020-01-01');
-    await frame.locator('#picker-issuedOn').getByRole('button').first().click();
-    const englishCalendar = frame.getByRole('dialog', { name: 'Date picker', exact: true });
-    await expect(englishCalendar).toBeVisible();
-    await englishCalendar.getByRole('button', { name: 'January 3, 2020', exact: true }).click();
     await setLanguage('zh-CN');
     await expect(frame.getByRole('heading', { name: '新增护照', exact: true })).toBeVisible();
     await expect(frame.locator('#field-holder')).toHaveValue('Unsaved name');
-    await expect(frame.locator('#field-issuedOn')).toHaveValue('2020-01-03');
-    await chooseDay('issuedOn', 4);
+    await expect(frame.locator('#field-issuedOn')).toHaveValue('2020-01-01');
+    await fill('issuedOn', '2020-01-04');
     await expect(frame.locator('#field-issuedOn')).toHaveValue('2020-01-04');
     await frame.getByRole('button', { name: '取消', exact: true }).click();
     await expect(frame.locator('#editor')).not.toBeVisible();
@@ -128,7 +124,7 @@ const assert = require('node:assert/strict');
     await page.reload(); await setLanguage('zh-CN');
     await expect(frame.locator('#records article')).toHaveCount(2);
     await tab('签证');
-    await frame.getByRole('button', { name: '新增签证', exact: true }).click();
+    await frame.getByRole('button', { name: 'Add', exact: true }).click();
     const oldId = await frame.locator('#field-passportId option').evaluateAll(options => options.find(o => o.textContent.includes('旧护照')).value);
     await select('passportId', oldId); await fill('destination', '日本'); await fill('type', '旅游 · 多次往返');
     await fill('number', 'VISA123456'); await fill('validFrom', '2026-01-01'); await fill('validUntil', '2029-01-01');
@@ -141,7 +137,7 @@ const assert = require('node:assert/strict');
     await expect(frame.locator('#records')).not.toContainText('（手动）');
     await expect(frame.locator('#records')).toContainText('旧护照');
     await tab('出入境记录');
-    await frame.getByRole('button', { name: '新增出入境记录', exact: true }).click();
+    await frame.getByRole('button', { name: 'Add', exact: true }).click();
     await fill('entryLocation', '东京羽田，日本');
     await fill('exitLocation', '首尔仁川，韩国');
     await assertDateRow();
@@ -159,11 +155,9 @@ const assert = require('node:assert/strict');
     await expect(frame.locator('#records')).toContainText('首尔仁川，韩国');
     await frame.getByRole('button', { name: '编辑', exact: true }).click();
     await fill('stayDaysOverride', '');
-    // Use the actual shared calendar inside the native editor dialog.
-    await chooseDay('exitDate', 5);
+    await fill('exitDate', '2026-11-05');
     await expect(frame.locator('#field-exitDate')).toHaveValue('2026-11-05');
-    await frame.locator('#picker-exitDate').getByRole('button').first().click();
-    await frame.getByRole('button', { name: '清除日期', exact: true }).click();
+    await fill('exitDate', '');
     await expect(frame.locator('#field-exitDate')).toHaveValue('');
     await save();
     await expect(frame.locator('#records')).toContainText('尚未离境');
@@ -176,20 +170,13 @@ const assert = require('node:assert/strict');
     await expect(frame.locator('#records')).toContainText('5678');
     await expect(frame.locator('#records')).toContainText('日本 · 旅游');
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(frame.getByRole('button', { name: '新增出入境记录' })).toBeVisible();
+    await expect(frame.getByRole('button', { name: 'Add' })).toBeVisible();
     assert.equal(await frame.locator('body').evaluate(body => body.scrollWidth <= window.innerWidth), true, 'mobile layout must not overflow horizontally');
     await frame.getByRole('button', { name: '编辑', exact: true }).click();
     await expect(frame.getByRole('button', { name: '保存记录', exact: true })).toBeVisible();
     await assertDateRow();
-    await frame.locator('#picker-entryDate').getByRole('button').first().click();
-    const mobileCalendar = frame.getByRole('dialog', { name: '日期选择器', exact: true });
-    await expect(mobileCalendar).toBeVisible();
-    assert.equal(await mobileCalendar.evaluate(node => {
-      const rect = node.getBoundingClientRect();
-      return rect.left >= 0 && rect.right <= window.innerWidth;
-    }), true, 'mobile calendar must fit the viewport');
-    await mobileCalendar.getByRole('button', { name: /月1日$/ }).click();
-    await expect(mobileCalendar).not.toBeVisible();
+    await expect(frame.locator('#field-entryDate')).toBeVisible();
+    await expect(frame.locator('#field-entryDate')).toHaveAttribute('type', 'date');
     await frame.getByRole('button', { name: '取消', exact: true }).click();
     await expect(frame.locator('#editor')).not.toBeVisible();
     await page.setViewportSize({ width: 1440, height: 1100 });
@@ -219,7 +206,7 @@ const assert = require('node:assert/strict');
     await expect(frame.getByRole('heading', { name: '还没有出入境记录' })).toBeVisible();
     await tab('签证申请');
     async function newApplication(status, place) {
-      await frame.getByRole('button', { name: '新增签证申请', exact: true }).click();
+      await frame.getByRole('button', { name: 'Add', exact: true }).click();
       await expect(frame.locator('#field-adjustmentReason')).toHaveCount(0);
       await select('passportId', oldId);
       await fill('destination', '日本'); await fill('type', '旅游');
@@ -267,15 +254,29 @@ const assert = require('node:assert/strict');
       await setLanguage('zh-CN');
     }
     await tab('出入境记录');
-    if (process.env.VISA_SCREENSHOT) {
-      await page.setViewportSize({ width: 390, height: 844 });
-      await frame.getByRole('button', { name: '新增出入境记录', exact: true }).click();
-      await fill('entryDate', '2026-11-01');
-      await frame.locator('#picker-entryDate').getByRole('button').first().click();
-      await frame.getByRole('dialog', { name: '日期选择器', exact: true }).screenshot({ path: path.join(source, 'docs/date-picker-mobile.png'), animations: 'disabled' });
-    }
+    await tab('港澳通行证');
+    await frame.getByRole('button', { name: 'Add', exact: true }).click();
+    await fill('holder', '港澳演示用户'); await fill('number', 'H12345678');
+    await select('status', 'current'); await fill('issuedOn', '2020-01-01'); await fill('expiresOn', '2030-01-01');
+    await select('hkEndorsementType', 'personalTravel');
+    await fill('hkEndorsementValidFrom', '2026-01-01'); await fill('hkEndorsementValidUntil', '2026-12-31'); await fill('hkEndorsementTotalEntries', '2');
+    await save();
+    await expect(frame.locator('#records')).toContainText('港澳演示用户');
+    await expect(frame.locator('#records')).toContainText('香港签注');
+    await expect(frame.locator('#overview .metric').filter({ hasText: 'HK & Macao permit records' }).locator('strong')).toHaveText('1');
+    await tab('港澳出入境记录');
+    await frame.getByRole('button', { name: 'Add', exact: true }).click();
+    await select('permitId', await frame.locator('#field-permitId option').nth(1).getAttribute('value'));
+    await select('destination', 'hongKong');
+    await fill('entryDate', '2026-11-20'); await select('entryPort', 'luohu');
+    await fill('exitDate', '2026-11-21'); await select('exitPort', 'shenzhenBay');
+    await save();
+    await expect(frame.locator('#records')).toContainText('罗湖');
+    await expect(frame.locator('#overview .metric').filter({ hasText: 'HK & Macao crossings' }).locator('strong')).toHaveText('1');
+    await tab('港澳通行证');
+    await expect(frame.locator('#records')).toContainText('1 次 / 2 次');
     assert.deepEqual(errors, []);
-    console.log('Browser smoke passed: visa application outcomes and approval conversion, independent locations, date row layout, page confirmation cancellation/confirmation, load failure retry and recovery, removed refresh button, English default, unsupported locale fallback, Chinese UI, unsaved draft language switching, shared date picker, calendar selection and clearing, forms, old/new passport links, overrides, persistence, guarded deletion, mobile layout.');
+    console.log('Browser smoke passed: visa and permit records, endorsement usage counts, selectable HK/Macao ports, visa application outcomes, independent locations, native date inputs and constraints, date row layout, loading failure retry, language handling, persistence, guarded deletion, and mobile layout.');
   } finally {
     if (browser) await browser.close();
     const exited = new Promise(resolve => child.once('exit', resolve));

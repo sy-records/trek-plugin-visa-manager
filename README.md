@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A TREK page plugin for your personal passports, visas, visa applications and border crossings. Version **1.0.0** supports TREK **>=5.1.4 <6.0.0**, using plugin API v1.
+A TREK page plugin for your personal passports, visas, visa applications and border crossings. Version **1.0.0** supports TREK **>=5.0.0 <6.0.0**, using plugin API v1.
 
 ## What it does
 

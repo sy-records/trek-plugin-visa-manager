@@ -12,6 +12,8 @@ let data = null;
 let kind = 'passports';
 let editing = null;
 let busy = false;
+let loading = true;
+let regionNames = new Intl.DisplayNames([language], { type: 'region' });
 let loadVersion = 0;
 let loadFailure = null;
 let initialized = false;
@@ -66,9 +68,12 @@ function validity(from, until) { return until < data.today ? [t('status.expired'
 
 async function load() {
   const version = ++loadVersion;
+  loading = true;
+  $('add').disabled = true;
   $('retry').disabled = true;
   $('records').setAttribute('aria-busy', 'true');
   errorAt('error');
+  renderNotice();
   try {
     const result = await invoke(`/records?today=${localDate()}`);
     if (version !== loadVersion) return;
@@ -79,29 +84,37 @@ async function load() {
     $('tab-permits').hidden = !data.hongKongMacaoEnabled;
     $('tab-permitStays').hidden = !data.hongKongMacaoEnabled;
     if (!data.hongKongMacaoEnabled && ['permits', 'permitStays'].includes(kind)) kind = 'passports';
+    loading = false;
     render();
   } catch (error) {
     if (version !== loadVersion) return;
     loadFailure = error;
     errorAt('error', t('messages.loadFailed', { message: error.message }), true);
-    if (!data) $('notice').textContent = t('page.notLoaded');
   } finally {
     if (version === loadVersion) {
+      loading = false;
+      $('add').disabled = !data;
       $('retry').disabled = false;
+      renderNotice();
       $('records').setAttribute('aria-busy', 'false');
     }
   }
 }
 
+function renderNotice() {
+  $('notice').textContent = t(loading
+    ? (initialized ? 'page.loading' : 'page.connecting')
+    : (data ? `notices.${kind}` : 'page.notLoaded'));
+}
+
 function render() {
-  $('add').disabled = false;
+  $('add').disabled = loading;
   $('add').textContent = t('actions.add');
   const validVisas = data.visas.filter(v => v.validFrom <= data.today && v.validUntil >= data.today).length;
-  const ongoing = data.stays.filter(s => s.phase === 'ongoing').length;
   const metrics = [
     [t('metrics.passports'), data.passports.length, t('metrics.passportHint')],
     [t('metrics.visas'), validVisas, t('metrics.visaHint', { count: data.visas.length })],
-    [t('metrics.stays'), data.stays.length, t('metrics.stayHint', { count: ongoing })],
+    [t('metrics.stays'), data.stays.length, t('metrics.crossingHint')],
   ];
   if (data.hongKongMacaoEnabled) {
     metrics.push(
@@ -119,17 +132,22 @@ function render() {
     tab.tabIndex = tab.dataset.kind === kind ? 0 : -1;
   }
   $('records').setAttribute('aria-labelledby', `tab-${kind}`);
-  $('notice').textContent = t(`notices.${kind}`);
+  renderNotice();
   const records = data[kind] ?? [];
   if (!records.length) {
     const empty = el('div', null, 'empty');
     const hint = ({ passports: 'empty.passportHint', visas: 'empty.visaHint', applications: 'empty.applicationHint', stays: 'empty.stayHint', permits: 'empty.permitHint', permitStays: 'empty.permitStayHint' })[kind];
     empty.append(el('h3', t(`empty.${kind}`)), el('p', t(hint), 'trek-muted'));
+    if (kind === 'stays' && data.passports.length) {
+      const add = button(t('actions.add'), () => openEditor(), 'primary');
+      add.disabled = loading;
+      empty.append(add);
+    }
     $('records').replaceChildren(empty);
     return;
   }
   const list = el('div', null, 'record-list');
-  const sorted = [...records].sort((a, b) => ['stays', 'permitStays'].includes(kind) ? b.entryDate.localeCompare(a.entryDate) : kind === 'visas' ? b.validUntil.localeCompare(a.validUntil) : kind === 'applications' ? b.submittedOn.localeCompare(a.submittedOn) : b.status.localeCompare(a.status));
+  const sorted = [...records].sort((a, b) => ['stays', 'permitStays'].includes(kind) ? (b.crossingDate ?? b.entryDate).localeCompare(a.crossingDate ?? a.entryDate) : kind === 'visas' ? b.validUntil.localeCompare(a.validUntil) : kind === 'applications' ? b.submittedOn.localeCompare(a.submittedOn) : b.status.localeCompare(a.status));
   for (const record of sorted) list.append(recordCard(record));
   $('records').replaceChildren(list);
 }
@@ -154,6 +172,12 @@ function recordCard(record) {
   } else if (kind === 'permitStays') {
     title.append(el('h3', t(`select.${record.destination}`)), el('div', `${portLabel(record, 'entryPort')} → ${record.exitDate ? portLabel(record, 'exitPort') : t('values.noDeparture')}`, 'record-subtitle'));
     status = record.phase === 'planned' ? [t('status.planned'), 'info'] : record.phase === 'ongoing' ? [t('status.ongoing'), 'accent'] : [t('status.completed'), 'success'];
+  } else if (record.crossingDate) {
+    title.append(
+      el('h3', t('values.crossingRoute', { from: regionName(record.departureCountry), to: regionName(record.arrivalCountry) })),
+      el('div', record.crossingDate, 'record-subtitle'),
+    );
+    status = record.phase === 'planned' ? [t('status.crossingPlanned'), 'info'] : [t('status.crossed'), 'success'];
   } else {
     title.append(el('h3', [record.entryLocation ?? record.destination, record.exitLocation].filter(Boolean).join(' → ')), el('div', `${record.entryDate} → ${record.exitDate ?? t('values.noDeparture')}`, 'record-subtitle'));
     status = record.phase === 'planned' ? [t('status.planned'), 'info'] : record.phase === 'ongoing' ? [t('status.ongoing'), 'accent'] : [t('status.completed'), 'success'];
@@ -205,12 +229,17 @@ function recordCard(record) {
     const endorsement = permit?.endorsements?.[record.destination];
     detail(details, t('fields.currentEndorsement'), endorsement ? `${endorsementLabel(endorsement.type)} · ${t('values.entries', { count: endorsement.usedEntries })} / ${endorsement.totalEntries === null ? t('values.unlimited') : t('values.entries', { count: endorsement.totalEntries })}` : t('select.noEndorsement'), true);
   } else {
-    detail(details, t('fields.entryLocation'), record.entryLocation ?? record.destination);
-    detail(details, t('fields.exitLocation'), record.exitLocation || t('values.notProvided'));
+    if (record.crossingDate) {
+      if (record.departurePlace) detail(details, t('fields.departurePlace'), record.departurePlace);
+      if (record.arrivalPlace) detail(details, t('fields.arrivalPlace'), record.arrivalPlace);
+    } else {
+      detail(details, t('fields.entryLocation'), record.entryLocation ?? record.destination);
+      detail(details, t('fields.exitLocation'), record.exitLocation || t('values.notProvided'));
+      detail(details, t('fields.stayDaysOverride'), t('values.days', { count: record.effectiveDays }));
+      if (record.stayDaysOverride !== null) detail(details, t('fields.calculatedDays'), t('values.days', { count: record.calculatedDays }));
+    }
     detail(details, t('fields.travelPassport'), passportLabel(data.passports.find(p => p.id === record.passportId)), true);
     detail(details, t('fields.visaId'), visaLabel(data.visas.find(v => v.id === record.visaId)), true);
-    detail(details, t('fields.stayDaysOverride'), t('values.days', { count: record.effectiveDays }));
-    if (record.stayDaysOverride !== null) detail(details, t('fields.calculatedDays'), t('values.days', { count: record.calculatedDays }));
   }
   if (record.notes) detail(details, t('fields.notes'), record.notes, true);
   const actions = el('div', null, 'record-actions');
@@ -231,6 +260,16 @@ function endorsementLabel(type) {
   return t(`select.${normalized === 'other' ? 'otherEndorsement' : normalized}`);
 }
 
+function regionName(code) { return regionNames.of(code) ?? code; }
+
+function regionOptions() {
+  return window.visaRegionCodes
+    .map(code => [code, regionName(code)])
+    .sort((a, b) => a[1].localeCompare(b[1], language));
+}
+
+function legacyStayEditor() { return kind === 'stays' && !!editing && !editing.crossingDate; }
+
 function portLabel(record, field) {
   return record[field] === 'other' ? record[`${field}Other`] : t(`port.${record[field]}`);
 }
@@ -247,7 +286,7 @@ function endorsementTypeOptions() {
   return ['personalTravel', 'groupTravel', 'familyVisit', 'business', 'stay', 'other'].map(type => [type, t(`select.${type === 'other' ? 'otherEndorsement' : type}`)]);
 }
 
-function fieldsFor() {
+function fieldsFor(record = editing) {
   const isValid = passport => (!passport.issuedOn || passport.issuedOn <= data.today) && passport.expiresOn >= data.today;
   const passportOptions = [...data.passports]
     .sort((a, b) => Number(isValid(b)) - Number(isValid(a)))
@@ -291,7 +330,7 @@ function fieldsFor() {
     ['notes', t('fields.notes'), 'textarea'],
   ];
   if (kind === 'permitStays') {
-    const destination = editing?.destination ?? 'hongKong';
+    const destination = record?.destination ?? 'hongKong';
     return [
       ['permitId', t('fields.permitId'), 'select', true, [...data.permits].sort((a, b) => Number(a.status === 'archived') - Number(b.status === 'archived')).map(permit => [permit.id, `${permit.holder} · ${masked(permit.number)}`])],
       ['destination', t('fields.permitDestination'), 'select', true, [['hongKong', t('select.hongKong')], ['macao', t('select.macao')]]],
@@ -299,28 +338,48 @@ function fieldsFor() {
       ['entryPort', t('fields.entryPort'), 'select', true, portOptions(destination)],
       ['entryPortOther', t('fields.otherPort'), 'text', false],
       ['exitDate', t('fields.exitDate'), 'date'],
-      ['exitPort', t('fields.exitPort'), 'select', false, [['', t('select.placeholder')], ...portOptions(destination)]],
+      ['exitPort', t('fields.exitPort'), 'select', false, portOptions(destination)],
       ['exitPortOther', t('fields.otherPort'), 'text', false],
       ['notes', t('fields.notes'), 'textarea'],
     ];
   }
-  return [
-    ['passportId', t('fields.travelPassport'), 'select', true, passportOptions],
+  const passport = ['passportId', t('fields.travelPassport'), 'select', true, passportOptions];
+  const visaOptions = data.visas.map(v => [v.id, `${visaLabel(v)} · ${passportLabel(data.passports.find(p => p.id === v.passportId))}`]);
+  const visa = ['visaId', t('fields.visaId'), 'select', false, visaOptions, t('hints.visaId')];
+  const notes = ['notes', t('fields.notes'), 'textarea'];
+  if (legacyStayEditor()) return [
+    passport,
     ['entryLocation', t('fields.entryLocation'), 'text', true], ['exitLocation', t('fields.exitLocation'), 'text'],
     ['entryDate', t('fields.entryDate'), 'date', true], ['exitDate', t('fields.exitDate'), 'date', false, null, t('hints.exitDate')],
     ['stayDaysOverride', t('fields.stayDaysOverride'), 'number', false, null, t('hints.stayDaysOverride')],
-    ['visaId', t('fields.visaId'), 'select', false, data.visas.map(v => [v.id, `${visaLabel(v)} · ${passportLabel(data.passports.find(p => p.id === v.passportId))}`]), t('hints.visaId')],
-    ['notes', t('fields.notes'), 'textarea'],
+    visa, notes,
+  ];
+
+  const regions = regionOptions();
+  return [
+    ['departureCountry', t('fields.departureCountry'), 'select', true, regions],
+    ['arrivalCountry', t('fields.arrivalCountry'), 'select', true, regions],
+    ['departurePlace', t('fields.departurePlace'), 'text'],
+    ['arrivalPlace', t('fields.arrivalPlace'), 'text'],
+    ['crossingDate', t('fields.crossingDate'), 'date', true],
+    passport, visa, notes,
+    ...(editing ? [] : [
+      ['returnSection', t('fields.returnSection'), 'section'],
+      ['returnDate', t('fields.returnDate'), 'date', false, null, t('hints.returnDate')],
+      ['returnDeparturePlace', t('fields.departurePlace'), 'text'],
+      ['returnArrivalPlace', t('fields.arrivalPlace'), 'text'],
+    ]),
   ];
 }
 
 function openEditor(record = null, defaults = {}) {
-  if (busy || !data) return;
+  if (busy || loading || !data) return;
   if (kind === 'permitStays' && !data.permits.length) { errorAt('error', t('messages.needPermit')); return; }
   if (!['passports', 'permits', 'permitStays'].includes(kind) && !data.passports.length) { errorAt('error', t('messages.needPassport')); return; }
   editing = record;
   renderEditor(record ?? defaults);
   $('editor').showModal();
+  $('field-departureCountry')?.focus();
 }
 
 function editorValue(record, key) {
@@ -363,14 +422,14 @@ function setupPermitStayForm() {
   const entryOther = $('field-entryPortOther');
   const exitOther = $('field-exitPortOther');
   const exitDate = $('field-exitDate');
-  const replaceOptions = (select, options, preserveBlank) => {
+  // TREK wraps selects and updates their visible label on change.
+  const exitPortField = exitPort.closest('.field');
+  const notifySelectChange = select => select.dispatchEvent(new Event('change', { bubbles: true }));
+  const replaceOptions = (select, options) => {
     const current = select.value;
-    select.replaceChildren(...(preserveBlank ? [new Option(t('select.placeholder'), '')] : []), ...options.map(([value, label]) => new Option(label, value)));
+    select.replaceChildren(new Option(t('select.placeholder'), ''), ...options.map(([value, label]) => new Option(label, value)));
     select.value = options.some(([value]) => value === current) ? current : '';
-  };
-  const updateDestination = () => {
-    replaceOptions(entryPort, portOptions(destination.value), false);
-    replaceOptions(exitPort, portOptions(destination.value), true);
+    notifySelectChange(select);
   };
   const updatePortField = (select, other, required) => {
     const show = select.value === 'other';
@@ -378,30 +437,61 @@ function setupPermitStayForm() {
     other.required = show && required;
     if (!show) other.value = '';
   };
+  const updateExitOther = () => updatePortField(exitPort, exitOther, !!exitDate.value);
   const updateExit = () => {
     const hasExit = !!exitDate.value;
-    const hasPort = hasExit && exitPort.value !== '';
-    exitPort.parentElement.hidden = !hasExit;
+    exitPortField.hidden = !hasExit;
     exitPort.required = hasExit;
-    exitOther.required = hasPort && exitPort.value === 'other';
-    if (!hasExit) { exitPort.value = ''; exitOther.value = ''; }
-    updatePortField(exitPort, exitOther, hasExit);
+    if (!hasExit && exitPort.value) {
+      exitPort.value = '';
+      notifySelectChange(exitPort);
+    }
+  };
+  const updateDestination = () => {
+    const options = portOptions(destination.value);
+    replaceOptions(entryPort, options);
+    replaceOptions(exitPort, options);
+    updateExit();
   };
   destination.addEventListener('change', updateDestination);
   entryPort.addEventListener('change', () => updatePortField(entryPort, entryOther, true));
-  exitPort.addEventListener('change', updateExit);
+  exitPort.addEventListener('change', updateExitOther);
+  exitDate.addEventListener('input', updateExit);
   exitDate.addEventListener('change', updateExit);
   updateDestination();
-  updatePortField(entryPort, entryOther, true);
-  updateExit();
+}
+
+function setupReturnFields() {
+  const returnDate = $('field-returnDate');
+  if (!returnDate) return;
+  const fields = ['returnDeparturePlace', 'returnArrivalPlace'].map(key => $(`field-${key}`).parentElement);
+  const preview = el('small');
+  preview.id = 'return-route';
+  preview.setAttribute('aria-live', 'polite');
+  returnDate.parentElement.append(preview);
+  returnDate.setAttribute('aria-describedby', 'hint-returnDate return-route');
+  const update = () => {
+    const from = $('field-arrivalCountry').value;
+    const to = $('field-departureCountry').value;
+    const hasReturn = !!returnDate.value;
+    for (const field of fields) field.hidden = !hasReturn;
+    preview.textContent = hasReturn && from && to && from !== to
+      ? t('values.crossingRoute', { from: regionName(from), to: regionName(to) })
+      : '';
+  };
+  for (const input of [returnDate, $('field-departureCountry'), $('field-arrivalCountry')]) {
+    input.addEventListener('input', update);
+  }
+  update();
 }
 
 function renderEditor(record) {
   editorLanguage = language;
   errorAt('form-error');
   $('editor-title').textContent = t(`${editing ? 'edit' : 'add'}.${kind}`);
-  const fields = fieldsFor().map(([key, label, type, required, options, hint, max]) => {
-    const wide = type === 'textarea' || key === 'applicationId' || (kind === 'stays' && key === 'passportId');
+  const fields = fieldsFor(record).map(([key, label, type, required, options, hint, max]) => {
+    const wide = type === 'textarea' || key === 'applicationId' || key === 'returnDate' ||
+      (legacyStayEditor() && key === 'passportId');
     if (type === 'section') {
       const section = el('div', null, 'field wide form-section');
       section.append(el('h3', label));
@@ -423,10 +513,18 @@ function renderEditor(record) {
       input.autocomplete = 'off';
       input.addEventListener('invalid', event => {
         event.preventDefault();
-        errorAt('form-error', t('errors.required', { field: label }));
+        if (input.form.querySelector(':invalid') !== input) return;
+        const error = input.validity.valueMissing ? 'errors.required' : 'errors.invalidDate';
+        errorAt('form-error', t(error, { field: label }));
+        input.focus();
       });
       field.append(caption, input);
-      if (hint) field.append(el('small', hint));
+      if (hint) {
+        const description = el('small', hint);
+        description.id = `hint-${key}`;
+        input.setAttribute('aria-describedby', description.id);
+        field.append(description);
+      }
       return field;
     }
     const input = el(type === 'textarea' ? 'textarea' : type === 'select' ? 'select' : 'input', null, `trek-${type === 'textarea' ? 'textarea' : type === 'select' ? 'select' : 'input'}`);
@@ -453,15 +551,26 @@ function renderEditor(record) {
       }
     });
     if (type !== 'select') input.autocomplete = 'off';
+    if (key === 'departureCountry' || key === 'arrivalCountry') {
+      // Keep native keyboard search and mobile pickers for the long region list.
+      input.setAttribute('data-trek-native', '');
+      input.addEventListener('invalid', event => {
+        event.preventDefault();
+        if (input.form.querySelector(':invalid') !== input) return;
+        errorAt('form-error', t('errors.required', { field: label }));
+        input.focus();
+      });
+    }
     field.append(caption, input);
     if (hint) { const hintNode = el('small', hint); hintNode.id = `hint-${key}`; input.setAttribute('aria-describedby', hintNode.id); field.append(hintNode); }
     return field;
   });
-  if (kind === 'stays') {
+  if (legacyStayEditor()) {
     const dateRow = el('div', null, 'date-row');
     dateRow.append(...fields.filter(field => ['entryDate', 'exitDate'].includes(field.dataset.key)));
     $('fields').replaceChildren(...fields.flatMap(field => field.dataset.key === 'entryDate' ? [dateRow] : field.dataset.key === 'exitDate' ? [] : [field]));
   } else $('fields').replaceChildren(...fields);
+  if (kind === 'stays' && !editing) setupReturnFields();
   if (kind === 'permits') setupPermitForm();
   if (kind === 'permitStays') setupPermitStayForm();
 }
@@ -504,18 +613,23 @@ $('record-form').addEventListener('submit', async event => {
       errorAt('form-error', t('errors.approvalMismatch')); return;
     }
   }
-  try { window.visaValidate(kind, body); }
+  try { window.visaValidate(kind, body, { legacyStay: legacyStayEditor() }); }
   catch (error) { errorAt('form-error', window.visaI18n.errorMessage(error, language)); return; }
   setBusy(true);
   errorAt('form-error');
+  let saveError;
   try {
     const endpoint = kind === 'permitStays' ? 'permit-stays' : kind;
-    await invoke(`/${endpoint}/save`, { method: 'POST', body });
+    const result = await invoke(`/${endpoint}/save`, { method: 'POST', body });
     $('editor').close();
-    trek.notify('success', t('messages.saved'));
+    trek.notify('success', t(result?.returnId ? 'messages.crossingsSaved' : 'messages.saved'));
     await load();
-  } catch (error) { errorAt('form-error', error.message); }
-  finally { setBusy(false); }
+  } catch (error) {
+    saveError = error;
+  } finally {
+    setBusy(false);
+    if (saveError) errorAt('form-error', t('messages.saveFailed', { message: saveError.message }));
+  }
 });
 async function deleteRecord(recordKind, record) {
   if (busy) return;
@@ -550,6 +664,7 @@ function applyLanguage(locale) {
   const next = resolveLanguage(locale);
   const changed = next !== language;
   language = next;
+  if (changed) regionNames = new Intl.DisplayNames([language], { type: 'region' });
   t = createTranslator(language);
   document.documentElement.lang = language;
   document.title = t('page.title');
@@ -563,6 +678,7 @@ function applyLanguage(locale) {
   }
   if ($('editor').open && !busy && editorLanguage !== language) renderEditor(Object.fromEntries(new FormData($('record-form'))));
   if (data) render();
+  else renderNotice();
 }
 applyLanguage('en');
 trek.onContext(context => {

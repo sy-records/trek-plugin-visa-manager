@@ -77,9 +77,15 @@ function route(method, path, handler) {
 }
 
 async function save(kind, req, ctx, userId) {
-  let record = validate(kind, req.body);
-  const updating = req.body.id != null;
+  const updating = req.body?.id != null;
   const recordId = updating ? id(req.body.id, 'fields.recordId') : randomUUID();
+  let legacyStay = false;
+  if (kind === 'stays' && updating) {
+    const rows = await ctx.db.query('SELECT data FROM stays WHERE user_id = ? AND id = ?', userId, recordId);
+    if (!rows.length) throw new InputError('errors.missingReference', {}, 404);
+    legacyStay = !JSON.parse(rows[0].data).crossingDate;
+  }
+  const { returnCrossing, ...record } = validate(kind, req.body, { legacyStay });
   if (kind === 'permits') {
     const rows = updating ? await ctx.db.query('SELECT data FROM permits WHERE user_id = ? AND id = ?', userId, recordId) : [];
     const previous = rows[0] ? JSON.parse(rows[0].data) : null;
@@ -133,6 +139,21 @@ async function save(kind, req, ctx, userId) {
   if (['visas', 'stays', 'applications'].includes(kind)) { columns.push('passport_id'); values.push(record.passportId); }
   if (kind === 'stays') { columns.push('visa_id'); values.push(record.visaId); }
   if (kind === 'permitStays') { columns.push('permit_id'); values.push(record.permitId); }
+  if (returnCrossing) {
+    const returnId = randomUUID();
+    // Both rows share the same passport. The guard also checks the outbound visa.
+    // Inserting both in one statement keeps the return from being saved on its own.
+    const result = await ctx.db.exec(
+      `INSERT INTO stays (data, passport_id, visa_id, user_id, id)
+       SELECT data, ?, visa_id, ?, id
+       FROM (SELECT ? AS data, ? AS visa_id, ? AS id UNION ALL SELECT ?, NULL, ?)
+       WHERE ${guard}`,
+      record.passportId, userId, JSON.stringify(record), record.visaId, recordId,
+      JSON.stringify(returnCrossing), returnId, ...refArgs,
+    );
+    if (result.changes !== 2) throw new InputError('errors.missingReference', {}, 404);
+    return json({ id: recordId, returnId }, 201);
+  }
   const result = updating
     ? await ctx.db.exec(`UPDATE ${TABLES[kind]} SET ${columns.map(col => `${col} = ?`).join(', ')} WHERE user_id = ? AND id = ? AND ${guard}`, ...values, userId, recordId, ...refArgs)
     : await ctx.db.exec(`INSERT INTO ${TABLES[kind]} (${columns.join(', ')}, user_id, id) SELECT ${columns.map(() => '?').join(', ')}, ?, ? WHERE ${guard}`, ...values, userId, recordId, ...refArgs);

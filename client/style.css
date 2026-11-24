@@ -71,3 +71,6 @@ button:disabled { opacity: .5; cursor: wait; }
   .actions { flex: 0 0 auto; gap: 8px; margin-left: auto; }
   .reveal { white-space: nowrap; }
 }
+
+.empty .trek-btn { margin-top: 12px; }
+#return-route:empty { display: none; }

@@ -1,6 +1,7 @@
 'use strict';
 
 const { errorMessage } = require('./i18n');
+const { REGION_CODES } = require('./regions');
 
 class InputError extends Error {
   constructor(key, params = {}, status = 400) {
@@ -54,7 +55,49 @@ function normalizeRecord(record) {
   return { ...rest, notes: reason && !notes.includes(reason) ? [notes, reason].filter(Boolean).join('\n\n') : notes };
 }
 
-function validate(kind, body) {
+function region(value, field) {
+  const code = text(value ?? '', field, true).toUpperCase();
+  if (!REGION_CODES.includes(code)) throw new InputError('errors.invalidRegion', { field });
+  return code;
+}
+
+function validateCrossing(body, common) {
+  const departureCountry = region(body.departureCountry, 'fields.departureCountry');
+  const arrivalCountry = region(body.arrivalCountry, 'fields.arrivalCountry');
+  if (departureCountry === arrivalCountry) throw new InputError('errors.sameCrossingCountry');
+  const crossingDate = date(body.crossingDate, 'fields.crossingDate', true);
+  const passportId = id(body.passportId, 'fields.travelPassport');
+  const crossing = {
+    ...common,
+    departureCountry,
+    arrivalCountry,
+    crossingDate,
+    departurePlace: text(body.departurePlace, 'fields.departurePlace'),
+    arrivalPlace: text(body.arrivalPlace, 'fields.arrivalPlace'),
+    passportId,
+    visaId: id(body.visaId, 'fields.visaId', true),
+  };
+
+  const returnDate = date(body.returnDate, 'fields.returnDate');
+  if (!returnDate) return crossing;
+  if (body.id != null) throw new InputError('errors.invalidRecord');
+  if (returnDate < crossingDate) throw new InputError('errors.returnDateOrder');
+  return {
+    ...crossing,
+    returnCrossing: {
+      departureCountry: arrivalCountry,
+      arrivalCountry: departureCountry,
+      crossingDate: returnDate,
+      departurePlace: text(body.returnDeparturePlace, 'fields.departurePlace'),
+      arrivalPlace: text(body.returnArrivalPlace, 'fields.arrivalPlace'),
+      passportId,
+      visaId: null,
+      notes: '',
+    },
+  };
+}
+
+function validate(kind, body, { legacyStay = false } = {}) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new InputError('errors.invalidRecord');
   const notes = text(body.notes, 'fields.notes', false, 5000);
   const legacyReason = text(body.adjustmentReason, 'fields.notes', false, 500);
@@ -150,6 +193,7 @@ function validate(kind, body) {
     if (validFrom > validUntil) throw new InputError('errors.visaDateOrder');
     return { ...common, passportId: id(body.passportId, 'fields.passportId'), destination: text(body.destination, 'fields.destination', true), type: text(body.type, 'fields.type', true), number: text(body.number, 'fields.visaNumber', false, 80), validFrom, validUntil, totalEntries: integer(body.totalEntries, 'fields.totalEntries', true), maxStayDays: integer(body.maxStayDays, 'fields.maxStayDays', true), remainingEntriesOverride: integer(body.remainingEntriesOverride, 'fields.remainingEntriesOverride', true), applicationId: id(body.applicationId, 'fields.applicationId', true) };
   }
+  if (!legacyStay) return validateCrossing(body, common);
   const entryDate = date(body.entryDate, 'fields.entryDate', true);
   const exitDate = date(body.exitDate, 'fields.exitDate');
   if (exitDate && exitDate < entryDate) throw new InputError('errors.stayDateOrder');
@@ -170,11 +214,14 @@ function summarize(data, today) {
     passports: data.passports,
     applications: data.applications ?? [],
     visas: data.visas.map(visa => {
-      const usedEntries = data.stays.filter(stay => stay.visaId === visa.id && stay.entryDate <= today).length;
+      const usedEntries = data.stays.filter(stay => stay.visaId === visa.id && (stay.crossingDate ?? stay.entryDate) <= today).length;
       const calculatedRemaining = visa.totalEntries === null ? null : Math.max(0, visa.totalEntries - usedEntries);
       return { ...visa, usedEntries, calculatedRemaining, effectiveRemaining: visa.remainingEntriesOverride ?? calculatedRemaining };
     }),
-    stays: data.stays.map(stay => staySummary(stay, today)), today,
+    stays: data.stays.map(stay => stay.crossingDate
+      ? { ...stay, phase: stay.crossingDate > today ? 'planned' : 'crossed' }
+      : staySummary(stay, today)),
+    today,
   };
 }
 

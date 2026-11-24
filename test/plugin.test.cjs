@@ -1,6 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { randomUUID } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const plugin = require('../server');
 const { summarize, validate } = require('../server/domain');
@@ -35,10 +36,18 @@ async function setup(t, config = {}) {
     assert.equal(result.status, 201, JSON.stringify(result.body));
     return result.body.id;
   }
-  return { ctx, call, add };
+  async function addLegacyStay(body) {
+    const id = randomUUID();
+    const record = validate('stays', body, { legacyStay: true });
+    await ctx.db.exec('INSERT INTO stays (user_id, id, data, passport_id, visa_id) VALUES (1, ?, ?, ?, ?)',
+      id, JSON.stringify(record), record.passportId, record.visaId);
+    return id;
+  }
+  return { ctx, call, add, addLegacyStay };
 }
 const passport = { holder: '本人', number: 'E12345678', country: '中国', issuedOn: '2018-01-01', expiresOn: '2028-01-01', status: 'current' };
 const visa = { destination: '日本', type: '旅游', validFrom: '2026-01-01', validUntil: '2029-01-01', totalEntries: 2 };
+const crossing = { departureCountry: 'CN', arrivalCountry: 'JP', crossingDate: '2026-11-01' };
 const stay = { destination: '日本', entryDate: '2026-11-01', exitDate: '2026-11-04' };
 const permit = {
   holder: '本人', number: 'H12345678', issuedOn: '2020-01-01', expiresOn: '2030-01-01', status: 'current',
@@ -126,11 +135,11 @@ test('permit validation rejects invalid endorsement dates, counts, ownership and
 });
 
 test('new passport can travel with a visa in an archived passport; CRUD persists manual values', async t => {
-  const { call, add } = await setup(t);
+  const { call, add, addLegacyStay } = await setup(t);
   const oldId = await add('passports', { ...passport, status: 'archived' });
   const newId = await add('passports', { ...passport, number: 'NEW123' });
   const visaId = await add('visas', { ...visa, passportId: oldId });
-  const stayId = await add('stays', { ...stay, passportId: newId, visaId, stayDaysOverride: 3, adjustmentReason: '以盖章记录为准' });
+  const stayId = await addLegacyStay({ ...stay, passportId: newId, visaId, stayDaysOverride: 3, adjustmentReason: '以盖章记录为准' });
   let response = await call('GET', '/records', undefined, 1, { today: '2026-11-20' });
   assert.equal(response.body.visas[0].passportId, oldId);
   assert.equal(response.body.stays[0].passportId, newId);
@@ -153,17 +162,17 @@ test('authentication and ownership gate every CRUD action and document reference
   const p1 = await add('passports', passport);
   const p2 = await add('passports', passport, 2);
   const v1 = await add('visas', { ...visa, passportId: p1 });
-  const s1 = await add('stays', { ...stay, passportId: p1, visaId: v1 });
+  const s1 = await add('stays', { ...crossing, passportId: p1, visaId: v1 });
   for (const route of plugin.routes) assert.equal((await call(route.method, route.path, {}, null)).status, 401);
   assert.deepEqual((await call('GET', '/records', undefined, 2)).body.visas, []);
   assert.deepEqual((await call('GET', '/records', undefined, 2)).body.stays, []);
-  for (const [kind, recordId, input] of [['passports', p1, passport], ['visas', v1, { ...visa, passportId: p2 }], ['stays', s1, { ...stay, passportId: p2 }]]) {
+  for (const [kind, recordId, input] of [['passports', p1, passport], ['visas', v1, { ...visa, passportId: p2 }], ['stays', s1, { ...crossing, passportId: p2 }]]) {
     assert.equal((await call('POST', `/${kind}/save`, { ...input, id: recordId }, 2)).status, 404);
     assert.equal((await call('DELETE', `/${kind}`, undefined, 2, { id: recordId })).status, 404);
   }
   assert.equal((await call('POST', '/visas/save', { ...visa, passportId: p1 }, 2)).status, 404);
-  assert.equal((await call('POST', '/stays/save', { ...stay, passportId: p1 }, 2)).status, 404);
-  assert.equal((await call('POST', '/stays/save', { ...stay, passportId: p2, visaId: v1 }, 2)).status, 404);
+  assert.equal((await call('POST', '/stays/save', { ...crossing, passportId: p1 }, 2)).status, 404);
+  assert.equal((await call('POST', '/stays/save', { ...crossing, passportId: p2, visaId: v1 }, 2)).status, 404);
   // A forged owner in the body has no effect.
   await add('passports', { ...passport, user_id: 1 }, 2);
   assert.equal((await call('GET', '/records')).body.passports.length, 1);
@@ -178,7 +187,7 @@ test('rejects malformed dates, inverted ranges, missing fields, invalid numbers 
   for (const patch of [{ totalEntries: -1 }, { totalEntries: '2' }, { totalEntries: 1.2 }, { remainingEntriesOverride: -2 }, { maxStayDays: 1000001 }, { validUntil: '2025-01-01' }]) {
     assert.equal((await call('POST', '/visas/save', { ...visa, passportId: p, ...patch })).status, 400);
   }
-  assert.equal((await call('POST', '/stays/save', { ...stay, passportId: p, exitDate: '2026-10-31' })).status, 400);
+  assert.equal((await call('POST', '/stays/save', { ...crossing, passportId: p, crossingDate: '2026-02-30' })).status, 400);
   assert.equal((await call('DELETE', '/passports', undefined, 1, { id: "' OR 1=1 --" })).status, 400);
   assert.equal((await call('GET', '/records', undefined, 1, { today: '2026-02-30' })).status, 400);
 });
@@ -203,11 +212,11 @@ test('calendar days include both endpoints, survive DST, support missing exit an
 });
 
 test('clearing overrides restores calculated results, including unlimited entries and visa-free stays', async t => {
-  const { call, add } = await setup(t);
+  const { call, add, addLegacyStay } = await setup(t);
   const p = await add('passports', passport);
   const v = await add('visas', { ...visa, passportId: p, totalEntries: null, remainingEntriesOverride: 0 });
   assert.equal((await call('POST', '/visas/save', { ...visa, id: v, passportId: p, totalEntries: null, remainingEntriesOverride: null })).status, 200);
-  const s = await add('stays', { ...stay, passportId: p, stayDaysOverride: 0 });
+  const s = await addLegacyStay({ ...stay, passportId: p, stayDaysOverride: 0 });
   assert.equal((await call('POST', '/stays/save', { ...stay, id: s, passportId: p, stayDaysOverride: null })).status, 200);
   const response = await call('GET', '/records', undefined, 1, { today: '2026-11-20' });
   assert.equal(response.body.visas[0].effectiveRemaining, null);
@@ -216,11 +225,11 @@ test('clearing overrides restores calculated results, including unlimited entrie
 });
 
 test('user export and idempotent account erasure cover only that user', async t => {
-  const { ctx, call, add } = await setup(t);
+  const { ctx, call, add, addLegacyStay } = await setup(t);
   const p1 = await add('passports', passport);
   await add('passports', passport, 2);
   const v = await add('visas', { ...visa, passportId: p1 });
-  await add('stays', { ...stay, passportId: p1, visaId: v });
+  await addLegacyStay({ ...stay, passportId: p1, visaId: v });
   await add('applications', { passportId: p1, destination: 'Japan', type: 'Tourist', status: 'refused', submittedOn: '2026-01-01', applicationLocation: 'Online' });
   const exported = await plugin.exportUserData({ userId: 1 }, ctx);
   assert.equal(exported.passports.length, 1);
@@ -306,9 +315,9 @@ test('only approved applications can create a linked visa, once and for the same
 });
 
 test('entry and departure locations accept different countries and legacy destinations still open', async t => {
-  const { call, add } = await setup(t);
+  const { call, add, addLegacyStay } = await setup(t);
   const p = await add('passports', passport);
-  const id = await add('stays', { passportId: p, entryDate: '2026-11-01', exitDate: '2026-11-04', entryLocation: 'Paris, France', exitLocation: 'Brussels, Belgium' });
+  const id = await addLegacyStay({ passportId: p, entryDate: '2026-11-01', exitDate: '2026-11-04', entryLocation: 'Paris, France', exitLocation: 'Brussels, Belgium' });
   const response = await call('GET', '/records');
   assert.equal(response.body.stays[0].entryLocation, 'Paris, France');
   assert.equal(response.body.stays[0].exitLocation, 'Brussels, Belgium');
@@ -325,4 +334,63 @@ test('legacy adjustment reasons are retained in Notes and survive editing', asyn
   assert.equal('adjustmentReason' in record, false);
   assert.equal((await call('POST', '/visas/save', record)).status, 200);
   assert.equal((await call('GET', '/records')).body.visas[0].notes, 'Original note\n\nOld adjustment');
+});
+
+test('crossings save once for a single leg or twice for a dated return', async t => {
+  const { call, add } = await setup(t);
+  const passportId = await add('passports', passport);
+  const visaId = await add('visas', { ...visa, passportId });
+  const body = { ...crossing, passportId, visaId, departurePlace: 'PVG', arrivalPlace: 'HND' };
+  const oneWay = await call('POST', '/stays/save', body);
+  assert.equal(oneWay.status, 201);
+  assert.equal(oneWay.body.returnId, undefined);
+  const roundTrip = await call('POST', '/stays/save', {
+    ...body, visaId: null, crossingDate: '2026-11-10', returnDate: '2026-11-10',
+    returnDeparturePlace: 'NRT', returnArrivalPlace: 'SHA',
+  });
+  assert.equal(roundTrip.status, 201);
+  const { stays, visas } = (await call('GET', '/records', undefined, 1, { today: '2026-11-08' })).body;
+  assert.equal(stays.length, 3);
+  const first = stays.find(item => item.id === oneWay.body.id);
+  assert.equal(first.phase, 'crossed');
+  assert.equal(first.effectiveDays, undefined);
+  assert.equal(visas[0].usedEntries, 1);
+  const outbound = stays.find(item => item.id === roundTrip.body.id);
+  assert.equal(outbound.returnCrossing, undefined);
+  const returnLeg = stays.find(item => item.id === roundTrip.body.returnId);
+  assert.deepEqual(returnLeg, {
+    id: roundTrip.body.returnId, departureCountry: 'JP', arrivalCountry: 'CN',
+    crossingDate: '2026-11-10', departurePlace: 'NRT', arrivalPlace: 'SHA',
+    passportId, visaId: null, notes: '', phase: 'planned',
+  });
+  assert.equal((await call('POST', '/stays/save', { ...body, id: oneWay.body.id, returnDate: '2026-11-12' })).status, 400);
+  assert.equal((await call('POST', '/stays/save', { ...body, id: oneWay.body.id, arrivalPlace: 'NRT' })).status, 200);
+  const updated = (await call('GET', '/records')).body.stays;
+  assert.equal(updated.length, 3);
+  assert.equal(updated.find(item => item.id === oneWay.body.id).arrivalPlace, 'NRT');
+});
+
+test('crossing validation and failed return insertion leave no partial records', async t => {
+  const { ctx, call, add } = await setup(t);
+  const passportId = await add('passports', passport);
+  const body = { ...crossing, passportId, returnDate: '2026-11-02' };
+  for (const patch of [
+    { departureCountry: '' }, { arrivalCountry: '' }, { arrivalCountry: 'cn' },
+    { arrivalCountry: 'ZZ' }, { crossingDate: '' }, { crossingDate: '2026-02-30' },
+    { returnDate: '2026-10-31' }, { returnDate: '2026-11-31' },
+  ]) {
+    assert.equal((await call('POST', '/stays/save', { ...body, ...patch })).status, 400);
+  }
+  assert.equal((await call('POST', '/stays/save', { ...stay, passportId })).status, 400);
+  assert.equal((await call('POST', '/stays/save', { ...body, visaId: 'missing' })).status, 404);
+  assert.deepEqual((await call('GET', '/records')).body.stays, []);
+
+  await ctx.db.exec(`CREATE TRIGGER fail_return BEFORE INSERT ON stays
+    WHEN json_extract(NEW.data, '$.arrivalCountry') = 'CN'
+    BEGIN SELECT RAISE(ABORT, 'Simulated database failure'); END`);
+  assert.equal((await call('POST', '/stays/save', body)).status, 500);
+  assert.deepEqual((await call('GET', '/records')).body.stays, []);
+  await ctx.db.exec('DROP TRIGGER fail_return');
+  assert.equal((await call('POST', '/stays/save', body)).status, 201);
+  assert.equal((await call('GET', '/records')).body.stays.length, 2);
 });

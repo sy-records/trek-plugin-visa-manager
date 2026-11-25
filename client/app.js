@@ -379,7 +379,6 @@ function openEditor(record = null, defaults = {}) {
   editing = record;
   renderEditor(record ?? defaults);
   $('editor').showModal();
-  $('field-departureCountry')?.focus();
 }
 
 function editorValue(record, key) {

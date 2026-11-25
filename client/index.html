@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-  <main class="page trek-page-enter">
+  <main class="page trek-scroll trek-page-enter">
     <header class="heading">
       <div><p class="eyebrow" data-i18n="page.eyebrow">PERSONAL TRAVEL DOCUMENTS</p><h1 data-i18n="page.title">Passports &amp; Visas</h1><p class="trek-muted" data-i18n="page.subtitle">Keep every passport. Connect every journey.</p></div>
     </header>
@@ -33,7 +33,7 @@
   </main>
   <dialog id="editor" aria-labelledby="editor-title">
     <form id="record-form">
-      <header class="dialog-heading"><div><p class="eyebrow" data-i18n="editor.eyebrow">TRAVEL DOCUMENTS</p><h2 id="editor-title"></h2></div><button id="close" type="button" class="trek-btn trek-btn--ghost" aria-label="Close editor" data-i18n="editor.close" data-i18n-aria="editor.closeLabel">Close</button></header>
+      <header class="dialog-heading"><div><p class="eyebrow" data-i18n="editor.eyebrow">TRAVEL DOCUMENTS</p><h2 id="editor-title" tabindex="-1" autofocus></h2></div><button id="close" type="button" class="trek-btn trek-btn--ghost" aria-label="Close editor" data-i18n="editor.close" data-i18n-aria="editor.closeLabel">Close</button></header>
       <div id="fields" class="fields"></div>
       <p id="form-error" class="error" role="alert" hidden></p>
       <footer class="dialog-actions"><button id="cancel" type="button" class="trek-btn trek-btn--secondary" data-i18n="editor.cancel">Cancel</button><button id="save" type="submit" class="trek-btn trek-btn--primary">Save record</button></footer>

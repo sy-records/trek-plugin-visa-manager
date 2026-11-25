@@ -95,8 +95,18 @@ const assert = require('node:assert/strict');
       await frame.locator(`#field-${key}`).fill(value);
     }
     async function select(key, value) { await frame.locator(`#field-${key}`).selectOption(value, { force: true }); }
-    async function save() { await frame.getByRole('button', { name: '保存记录', exact: true }).click(); await expect(frame.locator('#editor')).not.toBeVisible(); }
-    async function tab(name) { await frame.getByRole('tab', { name, exact: true }).click(); }
+    async function save() {
+      await frame.getByRole('button', { name: '保存记录', exact: true }).click();
+      await expect(frame.locator('#editor')).not.toBeVisible();
+      await expect(frame.locator('#records')).toHaveAttribute('aria-busy', 'false');
+      await expect(frame.locator('#save')).toBeEnabled();
+    }
+    async function tab(name) {
+      const button = frame.getByRole('tab', { name, exact: true });
+      await button.scrollIntoViewIfNeeded();
+      await button.click();
+      await expect(button).toHaveAttribute('aria-selected', 'true');
+    }
     async function answerDelete(button, yes = true) {
       const confirmation = page.waitForEvent('dialog', { timeout: 5000 }).then(async dialog => {
         assert.equal(dialog.type(), 'confirm');
@@ -155,7 +165,9 @@ const assert = require('node:assert/strict');
     const returnLeg = cards.filter({ hasText: '从日本出境 → 进入中国' });
     await expect(records.getByRole('heading', { name: '还没有出入境记录' })).toBeVisible();
     await records.getByRole('button', { name: '新增', exact: true }).click();
-    await expect(frame.locator('#field-departureCountry')).toBeFocused();
+    await expect(frame.locator('#editor-title')).toBeFocused();
+    await expect(frame.locator('#field-departureCountry')).not.toBeFocused();
+    await expect(frame.locator('#field-departureCountry')).toHaveValue('');
     const order = await frame.locator('#fields .field').evaluateAll(fields => fields.map(field => field.dataset.key));
     assert.ok(order.indexOf('departureCountry') < order.indexOf('arrivalCountry'));
     await expect(frame.locator('#field-returnDeparturePlace')).not.toBeVisible();
@@ -388,8 +400,90 @@ const assert = require('node:assert/strict');
     await expect(macao.locator('.record-subtitle')).toBeVisible();
     await expect(departureDetail(macao)).toHaveText('澳门临时客运码头');
     assert.equal(await frame.locator('body').evaluate(body => body.scrollWidth <= window.innerWidth), true, 'crossings must fit the mobile viewport');
+    // The real page host uses fill mode. Width-only previews leave body scrolling
+    // enabled and cannot catch a missing scroll container inside the plugin.
+    const phoneContext = await browser.newContext({
+      viewport: { width: 440, height: 956 }, isMobile: true, hasTouch: true,
+    });
+    try {
+      const phone = await phoneContext.newPage();
+      phone.on('pageerror', error => errors.push(error.message));
+      await phone.goto(`http://127.0.0.1:${port}/preview`);
+      await phone.addStyleTag({ content: `
+        html, body, .stage, .wrap { height: 100%; }
+        body { overflow: hidden; }
+        header, .hint { display: none !important; }
+        .stage { padding: 0; }
+        iframe { height: 100% !important; }
+      ` });
+      const phoneFrame = phone.frameLocator('iframe');
+      await expect(phoneFrame.locator('#records')).toHaveAttribute('aria-busy', 'false');
+      const context = await phoneFrame.locator('body').evaluate(() => window.trek.context);
+      await phone.evaluate(context => {
+        document.querySelector('iframe').contentWindow.postMessage({
+          ...context,
+          viewport: { formFactor: 'phone', surface: 'plugin-page', fill: true },
+        }, '*');
+      }, context);
+      await expect(phoneFrame.locator('html')).toHaveAttribute('data-fill', '');
+      const scroller = phoneFrame.locator('main');
+      const session = await phoneContext.newCDPSession(phone);
+      await session.send('Input.synthesizeScrollGesture', {
+        x: 190, y: 640, yDistance: -400, speed: 600,
+        gestureSourceType: 'touch', preventFling: true,
+      });
+      await expect.poll(() => scroller.evaluate(node => node.scrollTop)).toBeGreaterThan(100);
+      async function assertDateFieldsFit() {
+        const layout = await phoneFrame.locator('#editor').evaluate(dialog => ({
+          fits: dialog.scrollWidth <= dialog.clientWidth,
+          dates: [...dialog.querySelectorAll('input[type="date"]')].filter(input => input.getClientRects().length).map(input => ({
+            name: input.name,
+            width: input.getBoundingClientRect().width,
+            available: input.parentElement.getBoundingClientRect().width,
+          })),
+        }));
+        assert.equal(layout.fits, true, 'date fields must not make the dialog scroll horizontally');
+        for (const input of layout.dates) {
+          assert.ok(input.width <= input.available + 1, `${input.name} must fit its form column`);
+        }
+      }
+      for (const recordKind of ['passports', 'visas', 'applications', 'stays', 'permits', 'permitStays']) {
+        await phoneFrame.locator(`#tab-${recordKind}`).tap();
+        await expect(phoneFrame.locator(`#tab-${recordKind}`)).toHaveAttribute('aria-selected', 'true');
+        await phoneFrame.locator('#add').tap();
+        await expect(phoneFrame.locator('#editor')).toBeVisible();
+        await expect(phoneFrame.locator('#editor-title')).toBeFocused();
+        await expect(phoneFrame.locator('#close')).not.toBeFocused();
+        await phoneFrame.locator('#cancel').tap();
+        await expect(phoneFrame.locator('#editor')).toBeHidden();
+      }
+      await phoneFrame.locator('#tab-stays').tap();
+      await expect(phoneFrame.locator('#tab-stays')).toHaveAttribute('aria-selected', 'true');
+      await phoneFrame.locator('#add').tap();
+      await expect(phoneFrame.locator('#editor')).toBeVisible();
+      await assertDateFieldsFit();
+      await phoneFrame.locator('#field-departureCountry').selectOption('CN');
+      await phoneFrame.locator('#field-arrivalCountry').selectOption('JP');
+      await phoneFrame.locator('#field-crossingDate').fill('2026-11-24');
+      await phoneFrame.locator('#field-returnDate').fill('2026-11-25');
+      await assertDateFieldsFit();
+      await phoneFrame.locator('#field-returnDate').fill('');
+      await phoneFrame.locator('#field-passportId').selectOption(newId, { force: true });
+      await phoneFrame.locator('#save').tap();
+      await expect(phoneFrame.locator('#editor')).toBeHidden();
+      const phoneCards = phoneFrame.locator('#records article');
+      await expect(phoneCards).toHaveCount(1);
+      await phoneCards.getByRole('button', { name: 'Edit', exact: true }).tap();
+      await expect(phoneFrame.locator('#editor')).toBeVisible();
+      await phoneFrame.locator('#cancel').tap();
+      await expect(phoneFrame.locator('#editor')).toBeHidden();
+      await phoneFrame.locator('#tab-passports').tap();
+      await expect(phoneFrame.locator('#tab-passports')).toHaveAttribute('aria-selected', 'true');
+    } finally {
+      await phoneContext.close();
+    }
     assert.deepEqual(errors, []);
-    console.log('Browser smoke passed: visa and permit records, endorsement usage counts, HK/Macao departure port selection and display, visa application outcomes, single and paired crossings, departure first selection, reverse return routes, native date validation, loading and saving failure retry, language handling, persistence, guarded deletion, and mobile layout.');
+    console.log('Browser smoke passed: visa and permit records, endorsement usage counts, HK/Macao departure port selection and display, visa application outcomes, single and paired crossings, departure first selection, reverse return routes, native date validation, loading and saving failure retry, language handling, persistence, guarded deletion, mobile layout, and full-page phone touch scrolling, buttons, and date field widths.');
   } finally {
     if (browser) await browser.close();
     const exited = new Promise(resolve => child.once('exit', resolve));

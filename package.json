@@ -1,6 +1,6 @@
 {
   "name": "trek-plugin-visa-manager",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "type": "commonjs",
   "description": "TREK page plugin for personal passports, visas, visa applications and border crossings.",
